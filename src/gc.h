@@ -49,5 +49,7 @@ void GC_OnDelete(GarbageCollectorCtx *ctx);
 /* Render the GC stats to a redis connection, used by FT.INFO */
 void GC_RenderStats(RedisModuleCtx *ctx, GarbageCollectorCtx *gc);
 
+void GC_StartForkGC(GarbageCollectorCtx *gc);
+
 #endif  // RS_GC_C_
 #endif

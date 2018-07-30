@@ -13,6 +13,8 @@
 #include "numeric_index.h"
 #include "tag_index.h"
 #include "config.h"
+#include <unistd.h>
+#include <sys/wait.h>
 
 // convert a frequency to timespec
 struct timespec hzToTimeSpec(float hz) {
@@ -401,13 +403,30 @@ end:
   return totalRemoved;
 }
 
+typedef struct ForkGcCtx {
+  const RedisModuleString *keyName;
+  int pipefd[2];
+  GarbageCollectorCtx *gc;
+} ForkGcCtx;
+
+void GC_StartForkGC(ForkGcCtx *gc);
+
 /* The GC periodic callback, called in a separate thread. It selects a random term (using weighted
  * random) */
 static int gc_periodicCallback(RedisModuleCtx *ctx, void *privdata) {
+  GarbageCollectorCtx *gc = privdata;
+
+  ForkGcCtx fgc;
+  fgc.keyName = gc->keyName;
+  fgc.gc = gc;
+
+  GC_StartForkGC(&fgc);
+  return 1;
+
   int status = SPEC_STATUS_OK;
   RedisModule_AutoMemory(ctx);
   RedisModule_ThreadSafeContextLock(ctx);
-  GarbageCollectorCtx *gc = privdata;
+
   assert(gc);
 
   // Check if RDB is loading - not needed after the first time we find out that rdb is not reloading
@@ -514,3 +533,351 @@ void GC_RenderStats(RedisModuleCtx *ctx, GarbageCollectorCtx *gc) {
   }
   RedisModule_ReplySetArrayLength(ctx, n);
 }
+
+static void GC_FDWriteLongLong(int fd, long long val){
+  write(fd, &val, sizeof(long long));
+}
+
+static void GC_FDWriteBuffer(int fd, char* buff, size_t len){
+  GC_FDWriteLongLong(fd, len);
+  write(fd, buff, len);
+}
+
+static long long GC_FDReadLongLong(int fd){
+  long long ret;
+  ssize_t sizeRead = read(fd, &ret, sizeof(long long));
+  if(sizeRead != sizeof(long long)){
+    return 0;
+  }
+  return ret;
+}
+
+static char* GC_FDReadBuffer(int fd, size_t* len){
+  *len = GC_FDReadLongLong(fd);
+  if(*len == 0){
+    return NULL;
+  }
+  char* buff = rm_malloc(*len * sizeof(char*));
+  read(fd, buff, *len);
+  return buff;
+}
+
+static void GC_InvertedIndexRepair(ForkGcCtx *gc, RedisSearchCtx *sctx, InvertedIndex *idx){
+  IndexRepairParams params = {0};
+  int* blocksFixed = array_new(int, 10);
+  long long totalBytesCollected = 0;
+  long long totalDocsCollected = 0;
+  for (uint32_t i = 0; i < idx->size - 1 ; ++i) {
+    IndexBlock *blk = idx->blocks + i;
+    if (blk->lastId - blk->firstId > UINT32_MAX) {
+      // Skip over blocks which have a wide variation. In the future we might
+      // want to split a block into two (or more) on high-delta boundaries.
+      // todo: is it ok??
+      continue;
+    }
+    int repaired = IndexBlock_Repair(blk, &sctx->spec->docs, idx->flags, &params);
+    // We couldn't repair the block - return 0
+    if (repaired == -1) {
+      return;
+    }
+
+    if (repaired > 0) {
+      // todo: send the new block to father
+      blocksFixed = array_append(blocksFixed, i);
+    }
+
+    totalBytesCollected += params.bytesCollected;
+    totalDocsCollected += params.docsCollected;
+  }
+
+  if(array_len(blocksFixed) == 0){
+    // no blocks was repaired
+    GC_FDWriteLongLong(gc->pipefd[1], 0);
+    return;
+  }
+
+  // write number of repaired blocks
+  GC_FDWriteLongLong(gc->pipefd[1], array_len(blocksFixed));
+
+  // write total bytes collected
+  GC_FDWriteLongLong(gc->pipefd[1], totalBytesCollected);
+
+  // write total docs collected
+  GC_FDWriteLongLong(gc->pipefd[1], totalDocsCollected);
+
+  for(int i = 0 ; i < array_len(blocksFixed) ; ++i){
+    // write fix block
+    IndexBlock *blk = idx->blocks + blocksFixed[i];
+    GC_FDWriteLongLong(gc->pipefd[1], blocksFixed[i]); // writing the block index
+    GC_FDWriteLongLong(gc->pipefd[1], blk->firstId);
+    GC_FDWriteLongLong(gc->pipefd[1], blk->lastId);
+    GC_FDWriteLongLong(gc->pipefd[1], blk->numDocs);
+    GC_FDWriteBuffer(gc->pipefd[1], blk->data->data, blk->data->cap);
+  }
+}
+
+static void GC_CollectTerm(ForkGcCtx *gc, RedisSearchCtx *sctx, char* term, size_t termLen){
+  RedisModuleKey *idxKey = NULL;
+  InvertedIndex *idx = Redis_OpenInvertedIndexEx(sctx, term, strlen(term), 1, &idxKey);
+  if (idx) {
+    // inverted index name
+    GC_FDWriteBuffer(gc->pipefd[1], term, termLen);
+
+    GC_InvertedIndexRepair(gc, sctx, idx);
+  }
+  if(idxKey){
+    RedisModule_CloseKey(idxKey);
+  }
+}
+
+static void GC_CollectGarbage(ForkGcCtx *gc){
+  RedisModuleCtx *rctx = RedisModule_GetThreadSafeContext(NULL);
+  RedisModuleKey *idxKey = NULL;
+  RedisSearchCtx *sctx = NewSearchCtx(rctx, (RedisModuleString *)gc->keyName);
+  size_t totalRemoved = 0;
+  size_t totalCollected = 0;
+  if (!sctx){// todo : check if needed || sctx->spec->unique_id != gc->spec_unique_id) {
+    // write log here
+    return;
+  }
+  // Select a weighted random term
+  TimeSample ts;
+
+  TrieIterator *iter = Trie_Iterate(sctx->spec->terms, "", 0, 0, 1);
+  rune *rstr = NULL;
+  t_len slen = 0;
+  float score = 0;
+  int dist = 0;
+  while (TrieIterator_Next(iter, &rstr, &slen, NULL, &score, &dist)) {
+    size_t termLen;
+    char *term = runesToStr(rstr, slen, &termLen);
+    GC_CollectTerm(gc, sctx, term, termLen);
+    free(term);
+  }
+  DFAFilter_Free(iter->ctx);
+  free(iter->ctx);
+  TrieIterator_Free(iter);
+
+  // we are done with terms
+  GC_FDWriteBuffer(gc->pipefd[1], "\0", 1);
+
+  // moving to numeric fields
+  FieldSpec **numericFields = getFieldsByType(sctx->spec, FIELD_NUMERIC);
+
+  if (array_len(numericFields) != 0) {
+    for(int i = 0 ; i < array_len(numericFields) ; ++i){
+      RedisModuleString *keyName = IndexSpec_GetFormattedKey(sctx->spec, numericFields[i]);
+      NumericRangeTree *rt = OpenNumericIndex(sctx, keyName, &idxKey);
+
+      NumericRangeTreeIterator *gcIterator = NumericRangeTreeIterator_New(rt);
+      NumericRangeNode *currNode = NULL;
+      // inverted numeric field name
+      GC_FDWriteBuffer(gc->pipefd[1], numericFields[i]->name, strlen(numericFields[i]->name));
+      while((currNode = NumericRangeTreeIterator_Next(gcIterator))){
+        if(!currNode->range){
+          continue;
+        }
+        // write node pointer
+        GC_FDWriteLongLong(gc->pipefd[1], (long long)currNode);
+
+        GC_InvertedIndexRepair(gc, sctx, currNode->range->entries);
+      }
+      // we are done with the current field
+      GC_FDWriteLongLong(gc->pipefd[1], 0);
+
+      if (idxKey) RedisModule_CloseKey(idxKey);
+    }
+  }
+
+  // we are done with numeric fields
+  GC_FDWriteBuffer(gc->pipefd[1], "\0", 1);
+
+
+  if (sctx) {
+    RedisModule_CloseKey(sctx->key);
+    SearchCtx_Free(sctx);
+  }
+}
+
+typedef struct ModifiedBlock{
+  long long blockIndex;
+  IndexBlock *blk;
+}ModifiedBlock;
+
+bool GC_ReadInvertedIndex(ForkGcCtx *gc){
+  size_t len;
+  char* term = GC_FDReadBuffer(gc->pipefd[0], &len);
+  if(term == NULL || term[0] == '\0'){
+    if(term){
+      rm_free(term);
+    }
+    return false;
+  }
+  long long blocksModifiedSize = GC_FDReadLongLong(gc->pipefd[0]);
+  if(blocksModifiedSize == 0){
+    rm_free(term);
+    return true;
+  }
+
+  long long bytesCollected = GC_FDReadLongLong(gc->pipefd[0]);
+  long long docsCollected = GC_FDReadLongLong(gc->pipefd[0]);
+
+  ModifiedBlock blocksModified[blocksModifiedSize];
+  for(int i = 0 ; i < blocksModifiedSize ; ++i){
+    blocksModified[i].blk = rm_malloc(sizeof(IndexBlock));
+    blocksModified[i].blockIndex = GC_FDReadLongLong(gc->pipefd[0]);
+    blocksModified[i].blk->firstId = GC_FDReadLongLong(gc->pipefd[0]);
+    blocksModified[i].blk->lastId = GC_FDReadLongLong(gc->pipefd[0]);
+    blocksModified[i].blk->numDocs = GC_FDReadLongLong(gc->pipefd[0]);
+    size_t cap;
+    char* data = GC_FDReadBuffer(gc->pipefd[0], &cap);
+    blocksModified[i].blk->data = malloc(sizeof(Buffer));
+    blocksModified[i].blk->data->cap = cap;
+    blocksModified[i].blk->data->data = data;
+    blocksModified[i].blk->data->offset = 0;
+  }
+
+  RedisModuleCtx *rctx = RedisModule_GetThreadSafeContext(NULL);
+  RedisModule_ThreadSafeContextLock(rctx);
+  RedisModuleKey *idxKey = NULL;
+  RedisSearchCtx *sctx = NewSearchCtx(rctx, (RedisModuleString *)gc->keyName);
+  if (!sctx){// todo : check if needed || sctx->spec->unique_id != gc->spec_unique_id) {
+    // index change just return
+    if(idxKey){
+      RedisModule_CloseKey(idxKey);
+    }
+    if (sctx) {
+      RedisModule_CloseKey(sctx->key);
+      SearchCtx_Free(sctx);
+    }
+    if(term){
+      rm_free(term);
+    }
+    return false;
+  }
+  InvertedIndex *idx = Redis_OpenInvertedIndexEx(sctx, term, strlen(term), 1, &idxKey);
+
+  for(int i = 0 ; i < blocksModifiedSize ; ++i){
+    indexBlock_Free(&idx->blocks[blocksModified[i].blockIndex]);
+    idx->blocks[blocksModified[i].blockIndex].data = blocksModified[i].blk->data;
+    idx->blocks[blocksModified[i].blockIndex].firstId = blocksModified[i].blk->firstId;
+    idx->blocks[blocksModified[i].blockIndex].lastId = blocksModified[i].blk->lastId;
+    idx->blocks[blocksModified[i].blockIndex].numDocs = blocksModified[i].blk->numDocs;
+  }
+
+  gc_updateStats(sctx, gc->gc, docsCollected, bytesCollected);
+
+  RedisModule_ThreadSafeContextUnlock(rctx);
+
+  if(idxKey){
+    RedisModule_CloseKey(idxKey);
+  }
+  if (sctx) {
+    RedisModule_CloseKey(sctx->key);
+    SearchCtx_Free(sctx);
+  }
+  if(term){
+    rm_free(term);
+  }
+  return true;
+}
+
+bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
+  size_t fieldNameLen;
+  char* fieldName = GC_FDReadBuffer(gc->pipefd[0], &fieldNameLen);
+  if(fieldName == NULL || fieldName[0] == '\0'){
+    if(fieldName){
+      rm_free(fieldName);
+    }
+    return false;
+  }
+
+  NumericRangeNode *currNode = NULL;
+  while((currNode = (NumericRangeNode *)GC_FDReadLongLong(gc->pipefd[0]))){
+    long long blocksModifiedSize = GC_FDReadLongLong(gc->pipefd[0]);
+    if(blocksModifiedSize == 0){
+      continue;
+    }
+
+    long long bytesCollected = GC_FDReadLongLong(gc->pipefd[0]);
+    long long docsCollected = GC_FDReadLongLong(gc->pipefd[0]);
+
+    ModifiedBlock blocksModified[blocksModifiedSize];
+    for(int i = 0 ; i < blocksModifiedSize ; ++i){
+      blocksModified[i].blk = rm_malloc(sizeof(IndexBlock));
+      blocksModified[i].blockIndex = GC_FDReadLongLong(gc->pipefd[0]);
+      blocksModified[i].blk->firstId = GC_FDReadLongLong(gc->pipefd[0]);
+      blocksModified[i].blk->lastId = GC_FDReadLongLong(gc->pipefd[0]);
+      blocksModified[i].blk->numDocs = GC_FDReadLongLong(gc->pipefd[0]);
+      size_t cap;
+      char* data = GC_FDReadBuffer(gc->pipefd[0], &cap);
+      blocksModified[i].blk->data = malloc(sizeof(Buffer));
+      blocksModified[i].blk->data->cap = cap;
+      blocksModified[i].blk->data->data = data;
+      blocksModified[i].blk->data->offset = 0;
+    }
+
+    RedisModuleCtx *rctx = RedisModule_GetThreadSafeContext(NULL);
+    RedisModule_ThreadSafeContextLock(rctx);
+    RedisSearchCtx *sctx = NewSearchCtx(rctx, (RedisModuleString *)gc->keyName);
+    if (!sctx || sctx->spec->unique_id != gc->gc->spec_unique_id) {
+      // index change just return
+      return false;
+    }
+
+    if(!currNode->range){
+      continue;
+    }
+
+    for(int i = 0 ; i < blocksModifiedSize ; ++i){
+      indexBlock_Free(&currNode->range->entries->blocks[blocksModified[i].blockIndex]);
+      currNode->range->entries->blocks[blocksModified[i].blockIndex].data = blocksModified[i].blk->data;
+      currNode->range->entries->blocks[blocksModified[i].blockIndex].firstId = blocksModified[i].blk->firstId;
+      currNode->range->entries->blocks[blocksModified[i].blockIndex].lastId = blocksModified[i].blk->lastId;
+      currNode->range->entries->blocks[blocksModified[i].blockIndex].numDocs = blocksModified[i].blk->numDocs;
+    }
+
+    gc_updateStats(sctx, gc->gc, docsCollected, bytesCollected);
+
+    RedisModule_ThreadSafeContextUnlock(rctx);
+
+
+    if (sctx) {
+      RedisModule_CloseKey(sctx->key);
+      SearchCtx_Free(sctx);
+    }
+  }
+
+  if(fieldName){
+    rm_free(fieldName);
+  }
+  return true;
+
+}
+
+void GC_ReadInvertedIndexes(ForkGcCtx *gc){
+  while (GC_ReadInvertedIndex(gc));
+  while (GC_ReadNumericInvertedIndex(gc));
+}
+
+void GC_StartForkGC(ForkGcCtx *gc){
+  pid_t cpid;
+
+  pipe(gc->pipefd); // create the pipe
+  cpid = fork(); // duplicate the current process
+  if (cpid == 0)
+  {
+    close(gc->pipefd[0]);
+    GC_CollectGarbage(gc);
+    close(gc->pipefd[1]);
+    _exit(EXIT_SUCCESS);
+  }
+  else
+  {
+    close(gc->pipefd[1]);
+    GC_ReadInvertedIndexes(gc);
+    close(gc->pipefd[0]);
+    wait(NULL);
+  }
+}
+
