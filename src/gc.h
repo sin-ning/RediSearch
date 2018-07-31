@@ -7,7 +7,7 @@
 // the maximum frequency we are allowed to run in
 #define GC_MAX_HZ 100
 #define GC_MIN_HZ 1
-#define GC_DEFAULT_HZ 10
+#define GC_DEFAULT_HZ 1
 
 #define NUM_CYCLES_HISTORY 10
 
@@ -18,6 +18,9 @@ typedef struct {
   size_t numCycles;
   // the number of cycles that collected anything
   size_t effectiveCycles;
+
+  long long totalMSRun;
+  long long lastRunTimeMs;
 
   // the collection result of the last N cycles.
   // this is a cyclical buffer

@@ -19,8 +19,8 @@
 // convert a frequency to timespec
 struct timespec hzToTimeSpec(float hz) {
   struct timespec ret;
-  ret.tv_sec = (time_t)floor(1.0 / hz);
-  ret.tv_nsec = (long)floor(1000000000.0 / hz) % 1000000000L;
+  ret.tv_sec = 60;//(time_t)floor(1.0 / hz);
+  ret.tv_nsec = 0;//(long)floor(1000000000.0 / hz) % 1000000000L;
   return ret;
 }
 
@@ -68,7 +68,7 @@ GarbageCollectorCtx *NewGarbageCollector(const RedisModuleString *k, float initi
       .timer = NULL,
       .hz = initialHZ,
       .keyName = k,
-      .stats = {},
+      .stats = {0},
       .rdbPossiblyLoading = 1,
   };
 
@@ -530,6 +530,10 @@ void GC_RenderStats(RedisModuleCtx *ctx, GarbageCollectorCtx *gc) {
     REPLY_KVNUM(n, "effectiv_cycles_rate",
                 (double)gc->stats.effectiveCycles /
                     (double)(gc->stats.numCycles ? gc->stats.numCycles : 1));
+    REPLY_KVNUM(n, "total_ms_run", gc->stats.totalMSRun);
+    REPLY_KVNUM(n, "total_cycles", gc->stats.numCycles);
+    REPLY_KVNUM(n, "avarage_cycle_time_ms", (double)gc->stats.totalMSRun / gc->stats.numCycles);
+    REPLY_KVNUM(n, "last_run_time_ms", (double)gc->stats.lastRunTimeMs);
   }
   RedisModule_ReplySetArrayLength(ctx, n);
 }
@@ -822,10 +826,16 @@ bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
     RedisSearchCtx *sctx = NewSearchCtx(rctx, (RedisModuleString *)gc->keyName);
     if (!sctx || sctx->spec->unique_id != gc->gc->spec_unique_id) {
       // index change just return
+      RedisModule_ThreadSafeContextUnlock(rctx);
       return false;
     }
 
     if(!currNode->range){
+      if (sctx) {
+        RedisModule_CloseKey(sctx->key);
+        SearchCtx_Free(sctx);
+      }
+      RedisModule_ThreadSafeContextUnlock(rctx);
       continue;
     }
 
@@ -862,7 +872,9 @@ void GC_ReadInvertedIndexes(ForkGcCtx *gc){
 
 void GC_StartForkGC(ForkGcCtx *gc){
   pid_t cpid;
+  TimeSample ts;
 
+  TimeSampler_Start(&ts);
   pipe(gc->pipefd); // create the pipe
   cpid = fork(); // duplicate the current process
   if (cpid == 0)
@@ -879,5 +891,12 @@ void GC_StartForkGC(ForkGcCtx *gc){
     close(gc->pipefd[0]);
     wait(NULL);
   }
+  TimeSampler_End(&ts);
+
+  long long msRun = TimeSampler_DurationMS(&ts);
+
+  gc->gc->stats.numCycles++;
+  gc->gc->stats.totalMSRun += msRun;
+  gc->gc->stats.lastRunTimeMs = msRun;
 }
 
