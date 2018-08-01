@@ -747,8 +747,9 @@ bool GC_ReadInvertedIndex(ForkGcCtx *gc){
   RedisModule_ThreadSafeContextLock(rctx);
   RedisModuleKey *idxKey = NULL;
   RedisSearchCtx *sctx = NewSearchCtx(rctx, (RedisModuleString *)gc->keyName);
-  if (!sctx){// todo : check if needed || sctx->spec->unique_id != gc->spec_unique_id) {
+  if (!sctx || sctx->spec->unique_id != gc->gc->spec_unique_id) {
     // index change just return
+    RedisModule_ThreadSafeContextUnlock(rctx);
     if(idxKey){
       RedisModule_CloseKey(idxKey);
     }
@@ -831,15 +832,21 @@ bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
     if (!sctx || sctx->spec->unique_id != gc->gc->spec_unique_id) {
       // index change just return
       RedisModule_ThreadSafeContextUnlock(rctx);
-      return false;
-    }
-
-    if(!currNode->range){
       if (sctx) {
         RedisModule_CloseKey(sctx->key);
         SearchCtx_Free(sctx);
       }
+      RedisModule_FreeThreadSafeContext(rctx);
+      return false;
+    }
+
+    if(!currNode->range){
       RedisModule_ThreadSafeContextUnlock(rctx);
+      if (sctx) {
+        RedisModule_CloseKey(sctx->key);
+        SearchCtx_Free(sctx);
+      }
+      RedisModule_FreeThreadSafeContext(rctx);
       continue;
     }
 
@@ -860,6 +867,7 @@ bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
       RedisModule_CloseKey(sctx->key);
       SearchCtx_Free(sctx);
     }
+    RedisModule_FreeThreadSafeContext(rctx);
   }
 
   if(fieldName){
