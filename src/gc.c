@@ -642,6 +642,7 @@ static void GC_CollectGarbage(ForkGcCtx *gc){
   size_t totalCollected = 0;
   if (!sctx){// todo : check if needed || sctx->spec->unique_id != gc->spec_unique_id) {
     // write log here
+    RedisModule_FreeThreadSafeContext(rctx);
     return;
   }
   // Select a weighted random term
@@ -700,6 +701,7 @@ static void GC_CollectGarbage(ForkGcCtx *gc){
   if (sctx) {
     RedisModule_CloseKey(sctx->key);
     SearchCtx_Free(sctx);
+    RedisModule_FreeThreadSafeContext(rctx);
   }
 }
 
@@ -757,6 +759,7 @@ bool GC_ReadInvertedIndex(ForkGcCtx *gc){
     if(term){
       rm_free(term);
     }
+    RedisModule_FreeThreadSafeContext(rctx);
     return false;
   }
   InvertedIndex *idx = Redis_OpenInvertedIndexEx(sctx, term, strlen(term), 1, &idxKey);
@@ -783,6 +786,7 @@ bool GC_ReadInvertedIndex(ForkGcCtx *gc){
   if(term){
     rm_free(term);
   }
+  RedisModule_FreeThreadSafeContext(rctx);
   return true;
 }
 
