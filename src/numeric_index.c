@@ -72,8 +72,9 @@ int NumericRange_Add(NumericRange *n, t_docId docId, double value, int checkCard
     size_t card = n->card;
     for (int i = 0; i < MIN(card, n->splitCard); i++) {
 
-      if (n->values[i] == value) {
+      if (n->values[i].value == value) {
         add = 0;
+        n->values[i].appearances++;
         break;
       }
     }
@@ -82,7 +83,8 @@ int NumericRange_Add(NumericRange *n, t_docId docId, double value, int checkCard
   if (n->maxVal == NF_INFINITY || value > n->maxVal) n->maxVal = value;
   if (add) {
     if (n->card < n->splitCard) {
-      n->values[n->card] = value;
+      n->values[n->card].value = value;
+      n->values[n->card].appearances = 1;
       n->unique_sum += value;
     }
     ++n->card;
@@ -133,7 +135,7 @@ NumericRangeNode *NewLeafNode(size_t cap, double min, double max, size_t splitCa
                              .unique_sum = 0,
                              .card = 0,
                              .splitCard = splitCard,
-                             .values = RedisModule_Calloc(splitCard, sizeof(double)),
+                             .values = RedisModule_Calloc(splitCard, sizeof(CardinalityValue)),
                              .entries = NewInvertedIndex(Index_StoreNumeric, 1)};
   return n;
 }

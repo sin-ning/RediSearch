@@ -19,8 +19,8 @@
 // convert a frequency to timespec
 struct timespec hzToTimeSpec(float hz) {
   struct timespec ret;
-  ret.tv_sec = 60;//(time_t)floor(1.0 / hz);
-  ret.tv_nsec = 0;//(long)floor(1000000000.0 / hz) % 1000000000L;
+  ret.tv_sec = (time_t)floor(1.0 / hz);
+  ret.tv_nsec = (long)floor(1000000000.0 / hz) % 1000000000L;
   return ret;
 }
 
@@ -566,8 +566,12 @@ static char* GC_FDReadBuffer(int fd, size_t* len){
   return buff;
 }
 
-static void GC_InvertedIndexRepair(ForkGcCtx *gc, RedisSearchCtx *sctx, InvertedIndex *idx){
+static bool GC_InvertedIndexRepair(ForkGcCtx *gc, RedisSearchCtx *sctx, InvertedIndex *idx,
+                                   void (*RepairCallback)(const RSIndexResult *, void *),
+                                   void* arg){
   IndexRepairParams params = {0};
+  params.RepairCallback = RepairCallback;
+  params.arg = arg;
   int* blocksFixed = array_new(int, 10);
   long long totalBytesCollected = 0;
   long long totalDocsCollected = 0;
@@ -582,7 +586,7 @@ static void GC_InvertedIndexRepair(ForkGcCtx *gc, RedisSearchCtx *sctx, Inverted
     int repaired = IndexBlock_Repair(blk, &sctx->spec->docs, idx->flags, &params);
     // We couldn't repair the block - return 0
     if (repaired == -1) {
-      return;
+      return false;
     }
 
     if (repaired > 0) {
@@ -597,7 +601,7 @@ static void GC_InvertedIndexRepair(ForkGcCtx *gc, RedisSearchCtx *sctx, Inverted
   if(array_len(blocksFixed) == 0){
     // no blocks was repaired
     GC_FDWriteLongLong(gc->pipefd[1], 0);
-    return;
+    return false;
   }
 
   // write number of repaired blocks
@@ -618,6 +622,7 @@ static void GC_InvertedIndexRepair(ForkGcCtx *gc, RedisSearchCtx *sctx, Inverted
     GC_FDWriteLongLong(gc->pipefd[1], blk->numDocs);
     GC_FDWriteBuffer(gc->pipefd[1], blk->data->data, blk->data->cap);
   }
+  return true;
 }
 
 static void GC_CollectTerm(ForkGcCtx *gc, RedisSearchCtx *sctx, char* term, size_t termLen){
@@ -627,10 +632,20 @@ static void GC_CollectTerm(ForkGcCtx *gc, RedisSearchCtx *sctx, char* term, size
     // inverted index name
     GC_FDWriteBuffer(gc->pipefd[1], term, termLen);
 
-    GC_InvertedIndexRepair(gc, sctx, idx);
+    GC_InvertedIndexRepair(gc, sctx, idx, NULL, NULL);
   }
   if(idxKey){
     RedisModule_CloseKey(idxKey);
+  }
+}
+
+static void GC_CountDeletedCardinality(const RSIndexResult *r, void* arg){
+  CardinalityValue *valuesDeleted = arg;
+  for(int i = 0 ; i < array_len(valuesDeleted); ++i){
+    if(valuesDeleted[i].value == r->num.value){
+      valuesDeleted[i].appearances++;
+      return;
+    }
   }
 }
 
@@ -640,7 +655,7 @@ static void GC_CollectGarbage(ForkGcCtx *gc){
   RedisSearchCtx *sctx = NewSearchCtx(rctx, (RedisModuleString *)gc->keyName);
   size_t totalRemoved = 0;
   size_t totalCollected = 0;
-  if (!sctx){// todo : check if needed || sctx->spec->unique_id != gc->spec_unique_id) {
+  if (!sctx || sctx->spec->unique_id != gc->gc->spec_unique_id) {
     // write log here
     RedisModule_FreeThreadSafeContext(rctx);
     return;
@@ -682,10 +697,30 @@ static void GC_CollectGarbage(ForkGcCtx *gc){
         if(!currNode->range){
           continue;
         }
+
+        CardinalityValue *valuesDeleted = array_new(CardinalityValue, currNode->range->card);
+        for(int i = 0 ; i < currNode->range->card ; ++i){
+          CardinalityValue valueDeleted;
+          valueDeleted.value = currNode->range->values[i].value;
+          valueDeleted.appearances = 0;
+          valuesDeleted = array_append(valuesDeleted, valueDeleted);
+        }
         // write node pointer
         GC_FDWriteLongLong(gc->pipefd[1], (long long)currNode);
 
-        GC_InvertedIndexRepair(gc, sctx, currNode->range->entries);
+        bool repaired = GC_InvertedIndexRepair(gc, sctx, currNode->range->entries, GC_CountDeletedCardinality, valuesDeleted);
+
+        if(repaired){
+          //send reduced cardinality size
+          GC_FDWriteLongLong(gc->pipefd[1], currNode->range->card);
+
+          // send reduced cardinality
+          for(int i = 0 ; i < currNode->range->card ; ++i){
+            GC_FDWriteLongLong(gc->pipefd[1], valuesDeleted[i].appearances);
+          }
+
+          array_free(valuesDeleted);
+        }
       }
       // we are done with the current field
       GC_FDWriteLongLong(gc->pipefd[1], 0);
@@ -707,7 +742,7 @@ static void GC_CollectGarbage(ForkGcCtx *gc){
 
 typedef struct ModifiedBlock{
   long long blockIndex;
-  IndexBlock *blk;
+  IndexBlock blk;
 }ModifiedBlock;
 
 bool GC_ReadInvertedIndex(ForkGcCtx *gc){
@@ -730,17 +765,16 @@ bool GC_ReadInvertedIndex(ForkGcCtx *gc){
 
   ModifiedBlock blocksModified[blocksModifiedSize];
   for(int i = 0 ; i < blocksModifiedSize ; ++i){
-    blocksModified[i].blk = rm_malloc(sizeof(IndexBlock));
     blocksModified[i].blockIndex = GC_FDReadLongLong(gc->pipefd[0]);
-    blocksModified[i].blk->firstId = GC_FDReadLongLong(gc->pipefd[0]);
-    blocksModified[i].blk->lastId = GC_FDReadLongLong(gc->pipefd[0]);
-    blocksModified[i].blk->numDocs = GC_FDReadLongLong(gc->pipefd[0]);
+    blocksModified[i].blk.firstId = GC_FDReadLongLong(gc->pipefd[0]);
+    blocksModified[i].blk.lastId = GC_FDReadLongLong(gc->pipefd[0]);
+    blocksModified[i].blk.numDocs = GC_FDReadLongLong(gc->pipefd[0]);
     size_t cap;
     char* data = GC_FDReadBuffer(gc->pipefd[0], &cap);
-    blocksModified[i].blk->data = malloc(sizeof(Buffer));
-    blocksModified[i].blk->data->cap = cap;
-    blocksModified[i].blk->data->data = data;
-    blocksModified[i].blk->data->offset = 0;
+    blocksModified[i].blk.data = malloc(sizeof(Buffer));
+    blocksModified[i].blk.data->cap = cap;
+    blocksModified[i].blk.data->data = data;
+    blocksModified[i].blk.data->offset = 0;
   }
 
   RedisModuleCtx *rctx = RedisModule_GetThreadSafeContext(NULL);
@@ -767,10 +801,10 @@ bool GC_ReadInvertedIndex(ForkGcCtx *gc){
 
   for(int i = 0 ; i < blocksModifiedSize ; ++i){
     indexBlock_Free(&idx->blocks[blocksModified[i].blockIndex]);
-    idx->blocks[blocksModified[i].blockIndex].data = blocksModified[i].blk->data;
-    idx->blocks[blocksModified[i].blockIndex].firstId = blocksModified[i].blk->firstId;
-    idx->blocks[blocksModified[i].blockIndex].lastId = blocksModified[i].blk->lastId;
-    idx->blocks[blocksModified[i].blockIndex].numDocs = blocksModified[i].blk->numDocs;
+    idx->blocks[blocksModified[i].blockIndex].data = blocksModified[i].blk.data;
+    idx->blocks[blocksModified[i].blockIndex].firstId = blocksModified[i].blk.firstId;
+    idx->blocks[blocksModified[i].blockIndex].lastId = blocksModified[i].blk.lastId;
+    idx->blocks[blocksModified[i].blockIndex].numDocs = blocksModified[i].blk.numDocs;
   }
 
   gc_updateStats(sctx, gc->gc, docsCollected, bytesCollected);
@@ -813,17 +847,25 @@ bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
 
     ModifiedBlock blocksModified[blocksModifiedSize];
     for(int i = 0 ; i < blocksModifiedSize ; ++i){
-      blocksModified[i].blk = rm_malloc(sizeof(IndexBlock));
       blocksModified[i].blockIndex = GC_FDReadLongLong(gc->pipefd[0]);
-      blocksModified[i].blk->firstId = GC_FDReadLongLong(gc->pipefd[0]);
-      blocksModified[i].blk->lastId = GC_FDReadLongLong(gc->pipefd[0]);
-      blocksModified[i].blk->numDocs = GC_FDReadLongLong(gc->pipefd[0]);
+      blocksModified[i].blk.firstId = GC_FDReadLongLong(gc->pipefd[0]);
+      blocksModified[i].blk.lastId = GC_FDReadLongLong(gc->pipefd[0]);
+      blocksModified[i].blk.numDocs = GC_FDReadLongLong(gc->pipefd[0]);
       size_t cap;
       char* data = GC_FDReadBuffer(gc->pipefd[0], &cap);
-      blocksModified[i].blk->data = malloc(sizeof(Buffer));
-      blocksModified[i].blk->data->cap = cap;
-      blocksModified[i].blk->data->data = data;
-      blocksModified[i].blk->data->offset = 0;
+      blocksModified[i].blk.data = malloc(sizeof(Buffer));
+      blocksModified[i].blk.data->cap = cap;
+      blocksModified[i].blk.data->data = data;
+      blocksModified[i].blk.data->offset = 0;
+    }
+
+    // read reduced cardinality size
+    long long reduceCardinalitySize = GC_FDReadLongLong(gc->pipefd[0]);
+    long long valuesDeleted[reduceCardinalitySize];
+
+    // read reduced cardinality
+    for(int i = 0 ; i < reduceCardinalitySize ; ++i){
+      valuesDeleted[i] = GC_FDReadLongLong(gc->pipefd[0]);
     }
 
     RedisModuleCtx *rctx = RedisModule_GetThreadSafeContext(NULL);
@@ -852,11 +894,29 @@ bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
 
     for(int i = 0 ; i < blocksModifiedSize ; ++i){
       indexBlock_Free(&currNode->range->entries->blocks[blocksModified[i].blockIndex]);
-      currNode->range->entries->blocks[blocksModified[i].blockIndex].data = blocksModified[i].blk->data;
-      currNode->range->entries->blocks[blocksModified[i].blockIndex].firstId = blocksModified[i].blk->firstId;
-      currNode->range->entries->blocks[blocksModified[i].blockIndex].lastId = blocksModified[i].blk->lastId;
-      currNode->range->entries->blocks[blocksModified[i].blockIndex].numDocs = blocksModified[i].blk->numDocs;
+      currNode->range->entries->blocks[blocksModified[i].blockIndex].data = blocksModified[i].blk.data;
+      currNode->range->entries->blocks[blocksModified[i].blockIndex].firstId = blocksModified[i].blk.firstId;
+      currNode->range->entries->blocks[blocksModified[i].blockIndex].lastId = blocksModified[i].blk.lastId;
+      currNode->range->entries->blocks[blocksModified[i].blockIndex].numDocs = blocksModified[i].blk.numDocs;
     }
+
+
+    uint16_t newCard = 0;
+    CardinalityValue* newCardValues = rm_calloc(currNode->range->splitCard, sizeof(CardinalityValue));
+    for(int i = 0 ; i < currNode->range->card ; ++i){
+      int appearances = currNode->range->values[i].appearances;
+      if(i < reduceCardinalitySize){
+        appearances -= valuesDeleted[i];
+      }
+      if(appearances > 0){
+        newCardValues[newCard].value = currNode->range->values[i].value;
+        newCardValues[newCard].appearances = appearances;
+        ++newCard;
+      }
+    }
+    rm_free(currNode->range->values);
+    currNode->range->values = newCardValues;
+    currNode->range->card = newCard;
 
     gc_updateStats(sctx, gc->gc, docsCollected, bytesCollected);
 
@@ -886,6 +946,8 @@ void GC_StartForkGC(ForkGcCtx *gc){
   pid_t cpid;
   TimeSample ts;
 
+  size_t totalCollectedBefore = gc->gc->stats.totalCollected;
+
   TimeSampler_Start(&ts);
   pipe(gc->pipefd); // create the pipe
   cpid = fork(); // duplicate the current process
@@ -910,5 +972,18 @@ void GC_StartForkGC(ForkGcCtx *gc){
   gc->gc->stats.numCycles++;
   gc->gc->stats.totalMSRun += msRun;
   gc->gc->stats.lastRunTimeMs = msRun;
+
+  // if we didn't remove anything - reduce the frequency a bit.
+  // if we did  - increase the frequency a bit
+  if (gc->gc->timer) {
+    // the timer is NULL if we've been cancelled
+    if (totalCollectedBefore < gc->gc->stats.totalCollected) {
+      gc->gc->hz = MIN(gc->gc->hz * 1.2, GC_MAX_HZ);
+    } else {
+      gc->gc->hz = MAX(gc->gc->hz * 0.99, GC_MIN_HZ);
+    }
+    RMUtilTimer_SetInterval(gc->gc->timer, hzToTimeSpec(gc->gc->hz));
+  }
+
 }
 

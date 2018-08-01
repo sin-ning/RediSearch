@@ -7,7 +7,7 @@
 // the maximum frequency we are allowed to run in
 #define GC_MAX_HZ 100
 #define GC_MIN_HZ 1
-#define GC_DEFAULT_HZ 1
+#define GC_DEFAULT_HZ 10
 
 #define NUM_CYCLES_HISTORY 10
 
