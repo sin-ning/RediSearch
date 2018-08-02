@@ -15,12 +15,13 @@
 #include "config.h"
 #include <unistd.h>
 #include <sys/wait.h>
+#include <stdbool.h>
 
 // convert a frequency to timespec
 struct timespec hzToTimeSpec(float hz) {
   struct timespec ret;
-  ret.tv_sec = (time_t)floor(1.0 / hz);
-  ret.tv_nsec = (long)floor(1000000000.0 / hz) % 1000000000L;
+  ret.tv_sec = 60;//(time_t)floor(1.0 / hz);
+  ret.tv_nsec = 0;//(long)floor(1000000000.0 / hz) % 1000000000L;
   return ret;
 }
 
@@ -569,9 +570,6 @@ static char* GC_FDReadBuffer(int fd, size_t* len){
 static bool GC_InvertedIndexRepair(ForkGcCtx *gc, RedisSearchCtx *sctx, InvertedIndex *idx,
                                    void (*RepairCallback)(const RSIndexResult *, void *),
                                    void* arg){
-  IndexRepairParams params = {0};
-  params.RepairCallback = RepairCallback;
-  params.arg = arg;
   int* blocksFixed = array_new(int, 10);
   long long totalBytesCollected = 0;
   long long totalDocsCollected = 0;
@@ -583,6 +581,9 @@ static bool GC_InvertedIndexRepair(ForkGcCtx *gc, RedisSearchCtx *sctx, Inverted
       // todo: is it ok??
       continue;
     }
+    IndexRepairParams params = {0};
+    params.RepairCallback = RepairCallback;
+    params.arg = arg;
     int repaired = IndexBlock_Repair(blk, &sctx->spec->docs, idx->flags, &params);
     // We couldn't repair the block - return 0
     if (repaired == -1) {
@@ -590,12 +591,11 @@ static bool GC_InvertedIndexRepair(ForkGcCtx *gc, RedisSearchCtx *sctx, Inverted
     }
 
     if (repaired > 0) {
-      // todo: send the new block to father
       blocksFixed = array_append(blocksFixed, i);
     }
 
     totalBytesCollected += params.bytesCollected;
-    totalDocsCollected += params.docsCollected;
+    totalDocsCollected += repaired;
   }
 
   if(array_len(blocksFixed) == 0){
@@ -975,15 +975,15 @@ void GC_StartForkGC(ForkGcCtx *gc){
 
   // if we didn't remove anything - reduce the frequency a bit.
   // if we did  - increase the frequency a bit
-  if (gc->gc->timer) {
-    // the timer is NULL if we've been cancelled
-    if (totalCollectedBefore < gc->gc->stats.totalCollected) {
-      gc->gc->hz = MIN(gc->gc->hz * 1.2, GC_MAX_HZ);
-    } else {
-      gc->gc->hz = MAX(gc->gc->hz * 0.99, GC_MIN_HZ);
-    }
-    RMUtilTimer_SetInterval(gc->gc->timer, hzToTimeSpec(gc->gc->hz));
-  }
+//  if (gc->gc->timer) {
+//    // the timer is NULL if we've been cancelled
+//    if (totalCollectedBefore < gc->gc->stats.totalCollected) {
+//      gc->gc->hz = MIN(gc->gc->hz * 10, GC_MAX_HZ);
+//    } else {
+//      gc->gc->hz = MAX(gc->gc->hz * 0.1, GC_MIN_HZ);
+//    }
+//    RMUtilTimer_SetInterval(gc->gc->timer, hzToTimeSpec(gc->gc->hz));
+//  }
 
 }
 
