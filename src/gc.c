@@ -601,6 +601,7 @@ static bool GC_InvertedIndexRepair(ForkGcCtx *gc, RedisSearchCtx *sctx, Inverted
   if(array_len(blocksFixed) == 0){
     // no blocks was repaired
     GC_FDWriteLongLong(gc->pipefd[1], 0);
+    array_free(blocksFixed);
     return false;
   }
 
@@ -622,6 +623,7 @@ static bool GC_InvertedIndexRepair(ForkGcCtx *gc, RedisSearchCtx *sctx, Inverted
     GC_FDWriteLongLong(gc->pipefd[1], blk->numDocs);
     GC_FDWriteBuffer(gc->pipefd[1], blk->data->data, blk->data->cap);
   }
+  array_free(blocksFixed);
   return true;
 }
 
@@ -718,14 +720,15 @@ static void GC_CollectGarbage(ForkGcCtx *gc){
           for(int i = 0 ; i < currNode->range->card ; ++i){
             GC_FDWriteLongLong(gc->pipefd[1], valuesDeleted[i].appearances);
           }
-
-          array_free(valuesDeleted);
         }
+        array_free(valuesDeleted);
       }
       // we are done with the current field
       GC_FDWriteLongLong(gc->pipefd[1], 0);
 
       if (idxKey) RedisModule_CloseKey(idxKey);
+
+      NumericRangeTreeIterator_Free(gcIterator);
     }
   }
 
