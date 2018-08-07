@@ -535,6 +535,7 @@ void GC_RenderStats(RedisModuleCtx *ctx, GarbageCollectorCtx *gc) {
     REPLY_KVNUM(n, "total_cycles", gc->stats.numCycles);
     REPLY_KVNUM(n, "avarage_cycle_time_ms", (double)gc->stats.totalMSRun / gc->stats.numCycles);
     REPLY_KVNUM(n, "last_run_time_ms", (double)gc->stats.lastRunTimeMs);
+    REPLY_KVNUM(n, "num_of_numeric_nodes", (double)gc->stats.totalNodesInNumericTrees);
   }
   RedisModule_ReplySetArrayLength(ctx, n);
 }
@@ -614,6 +615,9 @@ static bool GC_InvertedIndexRepair(ForkGcCtx *gc, RedisSearchCtx *sctx, Inverted
   // write total docs collected
   GC_FDWriteLongLong(gc->pipefd[1], totalDocsCollected);
 
+  // write total number of blocks
+  GC_FDWriteLongLong(gc->pipefd[1], idx->size);
+
   for(int i = 0 ; i < array_len(blocksFixed) ; ++i){
     // write fix block
     IndexBlock *blk = idx->blocks + blocksFixed[i];
@@ -621,7 +625,11 @@ static bool GC_InvertedIndexRepair(ForkGcCtx *gc, RedisSearchCtx *sctx, Inverted
     GC_FDWriteLongLong(gc->pipefd[1], blk->firstId);
     GC_FDWriteLongLong(gc->pipefd[1], blk->lastId);
     GC_FDWriteLongLong(gc->pipefd[1], blk->numDocs);
-    GC_FDWriteBuffer(gc->pipefd[1], blk->data->data, blk->data->cap);
+    if(blk->data){
+      GC_FDWriteBuffer(gc->pipefd[1], blk->data->data, blk->data->cap);
+    }else{
+      GC_FDWriteBuffer(gc->pipefd[1], NULL, 0);
+    }
   }
   array_free(blocksFixed);
   return true;
@@ -693,9 +701,12 @@ static void GC_CollectGarbage(ForkGcCtx *gc){
 
       NumericRangeTreeIterator *gcIterator = NumericRangeTreeIterator_New(rt);
       NumericRangeNode *currNode = NULL;
+
+      uint64_t numericNodes = 0;
       // inverted numeric field name
       GC_FDWriteBuffer(gc->pipefd[1], numericFields[i]->name, strlen(numericFields[i]->name));
       while((currNode = NumericRangeTreeIterator_Next(gcIterator))){
+        ++numericNodes;
         if(!currNode->range){
           continue;
         }
@@ -723,6 +734,9 @@ static void GC_CollectGarbage(ForkGcCtx *gc){
         }
         array_free(valuesDeleted);
       }
+
+      // sending number of numeric nodes
+      GC_FDWriteLongLong(gc->pipefd[1], numericNodes);
       // we are done with the current field
       GC_FDWriteLongLong(gc->pipefd[1], 0);
 
@@ -847,6 +861,7 @@ bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
 
     long long bytesCollected = GC_FDReadLongLong(gc->pipefd[0]);
     long long docsCollected = GC_FDReadLongLong(gc->pipefd[0]);
+    gc->gc->stats.totalBlocksInNumericTrees += GC_FDReadLongLong(gc->pipefd[0]);
 
     ModifiedBlock blocksModified[blocksModifiedSize];
     for(int i = 0 ; i < blocksModifiedSize ; ++i){
@@ -856,10 +871,15 @@ bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
       blocksModified[i].blk.numDocs = GC_FDReadLongLong(gc->pipefd[0]);
       size_t cap;
       char* data = GC_FDReadBuffer(gc->pipefd[0], &cap);
-      blocksModified[i].blk.data = malloc(sizeof(Buffer));
-      blocksModified[i].blk.data->cap = cap;
-      blocksModified[i].blk.data->data = data;
-      blocksModified[i].blk.data->offset = 0;
+      if(data){
+        blocksModified[i].blk.data = malloc(sizeof(Buffer));
+        blocksModified[i].blk.data->cap = cap;
+        blocksModified[i].blk.data->data = data;
+        blocksModified[i].blk.data->offset = 0;
+      }else{
+        ++gc->gc->stats.totalEmptyBlocksInNumericTrees;
+        blocksModified[i].blk.data = NULL;
+      }
     }
 
     // read reduced cardinality size
@@ -933,6 +953,9 @@ bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
     RedisModule_FreeThreadSafeContext(rctx);
   }
 
+  // read number of numeric nodes
+  gc->gc->stats.totalNodesInNumericTrees += GC_FDReadLongLong(gc->pipefd[0]);
+
   if(fieldName){
     rm_free(fieldName);
   }
@@ -948,6 +971,9 @@ void GC_ReadInvertedIndexes(ForkGcCtx *gc){
 void GC_StartForkGC(ForkGcCtx *gc){
   pid_t cpid;
   TimeSample ts;
+
+  gc->gc->stats.totalNodesInNumericTrees = 0;
+  gc->gc->stats.totalBlocksInNumericTrees = 0;
 
   size_t totalCollectedBefore = gc->gc->stats.totalCollected;
 

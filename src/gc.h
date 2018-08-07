@@ -27,6 +27,10 @@ typedef struct {
   size_t history[NUM_CYCLES_HISTORY];
   // the offset in the history cyclical buffer
   int historyOffset;
+
+  uint64_t totalNodesInNumericTrees;
+  uint64_t totalBlocksInNumericTrees;
+  uint64_t totalEmptyBlocksInNumericTrees;
 } GCStats;
 
 #ifndef RS_GC_C_
