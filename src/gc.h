@@ -31,6 +31,7 @@ typedef struct {
   uint64_t totalNodesInNumericTrees;
   uint64_t totalBlocksInNumericTrees;
   uint64_t totalEmptyBlocksInNumericTrees;
+  uint64_t gcNumericNodesMissed;
 } GCStats;
 
 #ifndef RS_GC_C_

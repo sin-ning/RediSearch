@@ -542,6 +542,7 @@ void GC_RenderStats(RedisModuleCtx *ctx, GarbageCollectorCtx *gc) {
     REPLY_KVNUM(n, "num_of_numeric_nodes", (double)gc->stats.totalNodesInNumericTrees);
     REPLY_KVNUM(n, "total_blocks_in_numeric_trees", (double)gc->stats.totalBlocksInNumericTrees);
     REPLY_KVNUM(n, "total_empty_blocks_in_numeric_trees", (double)gc->stats.totalEmptyBlocksInNumericTrees);
+    REPLY_KVNUM(n, "gc_numeric_trees_missed", (double)gc->stats.gcNumericNodesMissed);
   }
   RedisModule_ReplySetArrayLength(ctx, n);
 }
@@ -912,6 +913,7 @@ bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
     }
 
     if(!currNode->range){
+      gc->gc->stats.gcNumericNodesMissed++;
       RedisModule_ThreadSafeContextUnlock(rctx);
       if (sctx) {
         RedisModule_CloseKey(sctx->key);
