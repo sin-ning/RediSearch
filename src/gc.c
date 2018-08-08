@@ -20,7 +20,7 @@
 // convert a frequency to timespec
 struct timespec hzToTimeSpec(float hz) {
   struct timespec ret;
-  ret.tv_sec = 60;//(time_t)floor(1.0 / hz);
+  ret.tv_sec = 10;//(time_t)floor(1.0 / hz);
   ret.tv_nsec = 0;//(long)floor(1000000000.0 / hz) % 1000000000L;
   return ret;
 }
@@ -408,6 +408,8 @@ typedef struct ForkGcCtx {
   const RedisModuleString *keyName;
   int pipefd[2];
   GarbageCollectorCtx *gc;
+  uint64_t totalNodesInNumericTrees;
+  uint64_t totalBlocksInNumericTrees;
 } ForkGcCtx;
 
 void GC_StartForkGC(ForkGcCtx *gc);
@@ -420,6 +422,8 @@ static int gc_periodicCallback(RedisModuleCtx *ctx, void *privdata) {
   ForkGcCtx fgc;
   fgc.keyName = gc->keyName;
   fgc.gc = gc;
+  fgc.totalBlocksInNumericTrees = 0;
+  fgc.totalNodesInNumericTrees = 0;
 
   GC_StartForkGC(&fgc);
   return 1;
@@ -536,6 +540,8 @@ void GC_RenderStats(RedisModuleCtx *ctx, GarbageCollectorCtx *gc) {
     REPLY_KVNUM(n, "avarage_cycle_time_ms", (double)gc->stats.totalMSRun / gc->stats.numCycles);
     REPLY_KVNUM(n, "last_run_time_ms", (double)gc->stats.lastRunTimeMs);
     REPLY_KVNUM(n, "num_of_numeric_nodes", (double)gc->stats.totalNodesInNumericTrees);
+    REPLY_KVNUM(n, "total_blocks_in_numeric_trees", (double)gc->stats.totalBlocksInNumericTrees);
+    REPLY_KVNUM(n, "total_empty_blocks_in_numeric_trees", (double)gc->stats.totalEmptyBlocksInNumericTrees);
   }
   RedisModule_ReplySetArrayLength(ctx, n);
 }
@@ -735,10 +741,11 @@ static void GC_CollectGarbage(ForkGcCtx *gc){
         array_free(valuesDeleted);
       }
 
-      // sending number of numeric nodes
-      GC_FDWriteLongLong(gc->pipefd[1], numericNodes);
       // we are done with the current field
       GC_FDWriteLongLong(gc->pipefd[1], 0);
+
+      // sending number of numeric nodes
+      GC_FDWriteLongLong(gc->pipefd[1], numericNodes);
 
       if (idxKey) RedisModule_CloseKey(idxKey);
 
@@ -779,6 +786,7 @@ bool GC_ReadInvertedIndex(ForkGcCtx *gc){
 
   long long bytesCollected = GC_FDReadLongLong(gc->pipefd[0]);
   long long docsCollected = GC_FDReadLongLong(gc->pipefd[0]);
+  GC_FDReadLongLong(gc->pipefd[0]); //throw
 
   ModifiedBlock blocksModified[blocksModifiedSize];
   for(int i = 0 ; i < blocksModifiedSize ; ++i){
@@ -861,7 +869,7 @@ bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
 
     long long bytesCollected = GC_FDReadLongLong(gc->pipefd[0]);
     long long docsCollected = GC_FDReadLongLong(gc->pipefd[0]);
-    gc->gc->stats.totalBlocksInNumericTrees += GC_FDReadLongLong(gc->pipefd[0]);
+    gc->totalBlocksInNumericTrees += GC_FDReadLongLong(gc->pipefd[0]);
 
     ModifiedBlock blocksModified[blocksModifiedSize];
     for(int i = 0 ; i < blocksModifiedSize ; ++i){
@@ -871,14 +879,12 @@ bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
       blocksModified[i].blk.numDocs = GC_FDReadLongLong(gc->pipefd[0]);
       size_t cap;
       char* data = GC_FDReadBuffer(gc->pipefd[0], &cap);
-      if(data){
-        blocksModified[i].blk.data = malloc(sizeof(Buffer));
-        blocksModified[i].blk.data->cap = cap;
-        blocksModified[i].blk.data->data = data;
-        blocksModified[i].blk.data->offset = 0;
-      }else{
-        ++gc->gc->stats.totalEmptyBlocksInNumericTrees;
-        blocksModified[i].blk.data = NULL;
+      blocksModified[i].blk.data = malloc(sizeof(Buffer));
+      blocksModified[i].blk.data->cap = cap;
+      blocksModified[i].blk.data->data = data;
+      blocksModified[i].blk.data->offset = 0;
+      if(!data){
+        gc->gc->stats.totalEmptyBlocksInNumericTrees++;
       }
     }
 
@@ -954,7 +960,7 @@ bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
   }
 
   // read number of numeric nodes
-  gc->gc->stats.totalNodesInNumericTrees += GC_FDReadLongLong(gc->pipefd[0]);
+  gc->totalNodesInNumericTrees += GC_FDReadLongLong(gc->pipefd[0]);
 
   if(fieldName){
     rm_free(fieldName);
@@ -971,9 +977,6 @@ void GC_ReadInvertedIndexes(ForkGcCtx *gc){
 void GC_StartForkGC(ForkGcCtx *gc){
   pid_t cpid;
   TimeSample ts;
-
-  gc->gc->stats.totalNodesInNumericTrees = 0;
-  gc->gc->stats.totalBlocksInNumericTrees = 0;
 
   size_t totalCollectedBefore = gc->gc->stats.totalCollected;
 
@@ -1013,6 +1016,13 @@ void GC_StartForkGC(ForkGcCtx *gc){
 //    }
 //    RMUtilTimer_SetInterval(gc->gc->timer, hzToTimeSpec(gc->gc->hz));
 //  }
+
+  if(gc->gc->stats.totalNodesInNumericTrees < gc->totalNodesInNumericTrees){
+    gc->gc->stats.totalNodesInNumericTrees = gc->totalNodesInNumericTrees;
+  }
+  if(gc->gc->stats.totalBlocksInNumericTrees < gc->totalBlocksInNumericTrees){
+    gc->gc->stats.totalBlocksInNumericTrees = gc->totalBlocksInNumericTrees;
+  }
 
 }
 
