@@ -20,7 +20,7 @@
 // convert a frequency to timespec
 struct timespec hzToTimeSpec(float hz) {
   struct timespec ret;
-  ret.tv_sec = 10;//(time_t)floor(1.0 / hz);
+  ret.tv_sec = 30;//(time_t)floor(1.0 / hz);
   ret.tv_nsec = 0;//(long)floor(1000000000.0 / hz) % 1000000000L;
   return ret;
 }
@@ -543,6 +543,7 @@ void GC_RenderStats(RedisModuleCtx *ctx, GarbageCollectorCtx *gc) {
     REPLY_KVNUM(n, "total_blocks_in_numeric_trees", (double)gc->stats.totalBlocksInNumericTrees);
     REPLY_KVNUM(n, "total_empty_blocks_in_numeric_trees", (double)gc->stats.totalEmptyBlocksInNumericTrees);
     REPLY_KVNUM(n, "gc_numeric_trees_missed", (double)gc->stats.gcNumericNodesMissed);
+    REPLY_KVNUM(n, "gc_blocks_denied", (double)gc->stats.gcBlockDenied);
   }
   RedisModule_ReplySetArrayLength(ctx, n);
 }
@@ -553,7 +554,9 @@ static void GC_FDWriteLongLong(int fd, long long val){
 
 static void GC_FDWriteBuffer(int fd, char* buff, size_t len){
   GC_FDWriteLongLong(fd, len);
-  write(fd, buff, len);
+  if(len > 0){
+    write(fd, buff, len);
+  }
 }
 
 static long long GC_FDReadLongLong(int fd){
@@ -579,9 +582,10 @@ static bool GC_InvertedIndexRepair(ForkGcCtx *gc, RedisSearchCtx *sctx, Inverted
                                    void (*RepairCallback)(const RSIndexResult *, void *),
                                    void* arg){
   int* blocksFixed = array_new(int, 10);
+  int* numDocsBefore[idx->size];
   long long totalBytesCollected = 0;
   long long totalDocsCollected = 0;
-  for (uint32_t i = 0; i < idx->size - 1 ; ++i) {
+  for (uint32_t i = 0; i < idx->size ; ++i) {
     IndexBlock *blk = idx->blocks + i;
     if (blk->lastId - blk->firstId > UINT32_MAX) {
       // Skip over blocks which have a wide variation. In the future we might
@@ -592,6 +596,7 @@ static bool GC_InvertedIndexRepair(ForkGcCtx *gc, RedisSearchCtx *sctx, Inverted
     IndexRepairParams params = {0};
     params.RepairCallback = RepairCallback;
     params.arg = arg;
+    numDocsBefore[i] = blk->numDocs;
     int repaired = IndexBlock_Repair(blk, &sctx->spec->docs, idx->flags, &params);
     // We couldn't repair the block - return 0
     if (repaired == -1) {
@@ -632,10 +637,13 @@ static bool GC_InvertedIndexRepair(ForkGcCtx *gc, RedisSearchCtx *sctx, Inverted
     GC_FDWriteLongLong(gc->pipefd[1], blk->firstId);
     GC_FDWriteLongLong(gc->pipefd[1], blk->lastId);
     GC_FDWriteLongLong(gc->pipefd[1], blk->numDocs);
-    if(blk->data){
+    GC_FDWriteLongLong(gc->pipefd[1], numDocsBefore[blocksFixed[i]]); // send num docs before
+    if(blk->data->data){
       GC_FDWriteBuffer(gc->pipefd[1], blk->data->data, blk->data->cap);
+      GC_FDWriteLongLong(gc->pipefd[1], blk->data->offset);
     }else{
       GC_FDWriteBuffer(gc->pipefd[1], NULL, 0);
+      GC_FDWriteLongLong(gc->pipefd[1], 0);
     }
   }
   array_free(blocksFixed);
@@ -767,6 +775,7 @@ static void GC_CollectGarbage(ForkGcCtx *gc){
 
 typedef struct ModifiedBlock{
   long long blockIndex;
+  int numBlocksBefore;
   IndexBlock blk;
 }ModifiedBlock;
 
@@ -795,12 +804,16 @@ bool GC_ReadInvertedIndex(ForkGcCtx *gc){
     blocksModified[i].blk.firstId = GC_FDReadLongLong(gc->pipefd[0]);
     blocksModified[i].blk.lastId = GC_FDReadLongLong(gc->pipefd[0]);
     blocksModified[i].blk.numDocs = GC_FDReadLongLong(gc->pipefd[0]);
+    blocksModified[i].numBlocksBefore = GC_FDReadLongLong(gc->pipefd[0]);
     size_t cap;
     char* data = GC_FDReadBuffer(gc->pipefd[0], &cap);
     blocksModified[i].blk.data = malloc(sizeof(Buffer));
+    blocksModified[i].blk.data->offset = GC_FDReadLongLong(gc->pipefd[0]);;
     blocksModified[i].blk.data->cap = cap;
     blocksModified[i].blk.data->data = data;
-    blocksModified[i].blk.data->offset = 0;
+    if(data == NULL){
+      gc->gc->stats.totalEmptyBlocksInNumericTrees++;
+    }
   }
 
   RedisModuleCtx *rctx = RedisModule_GetThreadSafeContext(NULL);
@@ -826,11 +839,15 @@ bool GC_ReadInvertedIndex(ForkGcCtx *gc){
   InvertedIndex *idx = Redis_OpenInvertedIndexEx(sctx, term, strlen(term), 1, &idxKey);
 
   for(int i = 0 ; i < blocksModifiedSize ; ++i){
-    indexBlock_Free(&idx->blocks[blocksModified[i].blockIndex]);
-    idx->blocks[blocksModified[i].blockIndex].data = blocksModified[i].blk.data;
-    idx->blocks[blocksModified[i].blockIndex].firstId = blocksModified[i].blk.firstId;
-    idx->blocks[blocksModified[i].blockIndex].lastId = blocksModified[i].blk.lastId;
-    idx->blocks[blocksModified[i].blockIndex].numDocs = blocksModified[i].blk.numDocs;
+    if(blocksModified[i].numBlocksBefore == idx->blocks[blocksModified[i].blockIndex].numDocs){
+      indexBlock_Free(&idx->blocks[blocksModified[i].blockIndex]);
+      idx->blocks[blocksModified[i].blockIndex].data = blocksModified[i].blk.data;
+      idx->blocks[blocksModified[i].blockIndex].firstId = blocksModified[i].blk.firstId;
+      idx->blocks[blocksModified[i].blockIndex].lastId = blocksModified[i].blk.lastId;
+      idx->blocks[blocksModified[i].blockIndex].numDocs = blocksModified[i].blk.numDocs;
+    }else{
+      Buffer_Free(blocksModified[i].blk.data);
+    }
   }
 
   gc_updateStats(sctx, gc->gc, docsCollected, bytesCollected);
@@ -878,13 +895,14 @@ bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
       blocksModified[i].blk.firstId = GC_FDReadLongLong(gc->pipefd[0]);
       blocksModified[i].blk.lastId = GC_FDReadLongLong(gc->pipefd[0]);
       blocksModified[i].blk.numDocs = GC_FDReadLongLong(gc->pipefd[0]);
+      blocksModified[i].numBlocksBefore = GC_FDReadLongLong(gc->pipefd[0]);
       size_t cap;
       char* data = GC_FDReadBuffer(gc->pipefd[0], &cap);
       blocksModified[i].blk.data = malloc(sizeof(Buffer));
+      blocksModified[i].blk.data->offset = GC_FDReadLongLong(gc->pipefd[0]);;
       blocksModified[i].blk.data->cap = cap;
       blocksModified[i].blk.data->data = data;
-      blocksModified[i].blk.data->offset = 0;
-      if(!data){
+      if(data == NULL){
         gc->gc->stats.totalEmptyBlocksInNumericTrees++;
       }
     }
@@ -924,11 +942,16 @@ bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
     }
 
     for(int i = 0 ; i < blocksModifiedSize ; ++i){
-      indexBlock_Free(&currNode->range->entries->blocks[blocksModified[i].blockIndex]);
-      currNode->range->entries->blocks[blocksModified[i].blockIndex].data = blocksModified[i].blk.data;
-      currNode->range->entries->blocks[blocksModified[i].blockIndex].firstId = blocksModified[i].blk.firstId;
-      currNode->range->entries->blocks[blocksModified[i].blockIndex].lastId = blocksModified[i].blk.lastId;
-      currNode->range->entries->blocks[blocksModified[i].blockIndex].numDocs = blocksModified[i].blk.numDocs;
+      if(blocksModified[i].numBlocksBefore == currNode->range->entries->blocks[blocksModified[i].blockIndex].numDocs){
+        indexBlock_Free(&currNode->range->entries->blocks[blocksModified[i].blockIndex]);
+        currNode->range->entries->blocks[blocksModified[i].blockIndex].data = blocksModified[i].blk.data;
+        currNode->range->entries->blocks[blocksModified[i].blockIndex].firstId = blocksModified[i].blk.firstId;
+        currNode->range->entries->blocks[blocksModified[i].blockIndex].lastId = blocksModified[i].blk.lastId;
+        currNode->range->entries->blocks[blocksModified[i].blockIndex].numDocs = blocksModified[i].blk.numDocs;
+      }else{
+        gc->gc->stats.gcBlockDenied++;
+        Buffer_Free(blocksModified[i].blk.data);
+      }
     }
 
 
