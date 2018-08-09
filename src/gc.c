@@ -956,19 +956,22 @@ bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
 
 
     uint16_t newCard = 0;
-    CardinalityValue* newCardValues = rm_calloc(currNode->range->splitCard, sizeof(CardinalityValue));
-    for(int i = 0 ; i < currNode->range->card ; ++i){
+    CardinalityValue* newCardValues = array_new(CardinalityValue, currNode->range->splitCard);
+    for(int i = 0 ; i < array_len(currNode->range->values) ; ++i){
       int appearances = currNode->range->values[i].appearances;
       if(i < reduceCardinalitySize){
         appearances -= valuesDeleted[i];
       }
       if(appearances > 0){
-        newCardValues[newCard].value = currNode->range->values[i].value;
-        newCardValues[newCard].appearances = appearances;
+        CardinalityValue val;
+        val.value = currNode->range->values[i].value;
+        val.appearances = appearances;
+        newCardValues = array_append(newCardValues, val);
         ++newCard;
       }
     }
-    rm_free(currNode->range->values);
+    array_free(currNode->range->values);
+    array_trimm_cap(newCardValues, newCard);
     currNode->range->values = newCardValues;
     currNode->range->card = newCard;
 
