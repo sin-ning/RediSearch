@@ -12,6 +12,7 @@ ADD_LIBRARY(rmutil OBJECT
 
 FUNCTION(_rmutilTest name)
     ADD_EXECUTABLE("${name}" "${name}.c" $<TARGET_OBJECTS:rmutil>)
+    TARGET_LINK_LIBRARIES(${name} m)
     ADD_TEST(NAME "${name}" COMMAND "${name}")
 ENDFUNCTION()
 
