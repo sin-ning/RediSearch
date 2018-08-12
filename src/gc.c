@@ -988,7 +988,7 @@ bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
       }
     }
     array_free(currNode->range->values);
-    array_trimm_cap(newCardValues, newCard);
+    newCardValues = array_trimm_cap(newCardValues, newCard);
     currNode->range->values = newCardValues;
     currNode->range->card = newCard;
 
