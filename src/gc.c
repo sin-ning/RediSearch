@@ -17,6 +17,8 @@
 #include <sys/wait.h>
 #include <stdbool.h>
 
+uint32_t gcRevisionId = 0;
+
 // convert a frequency to timespec
 struct timespec hzToTimeSpec(float hz) {
   struct timespec ret;
@@ -410,6 +412,7 @@ typedef struct ForkGcCtx {
   GarbageCollectorCtx *gc;
   uint64_t totalNodesInNumericTrees;
   uint64_t totalBlocksInNumericTrees;
+  uint32_t lastRecievedGcRevisionId;
 } ForkGcCtx;
 
 void GC_StartForkGC(ForkGcCtx *gc);
@@ -582,7 +585,7 @@ static bool GC_InvertedIndexRepair(ForkGcCtx *gc, RedisSearchCtx *sctx, Inverted
                                    void (*RepairCallback)(const RSIndexResult *, void *),
                                    void* arg){
   int* blocksFixed = array_new(int, 10);
-  int* numDocsBefore[idx->size];
+  int numDocsBefore[idx->size];
   long long totalBytesCollected = 0;
   long long totalDocsCollected = 0;
   for (uint32_t i = 0; i < idx->size ; ++i) {
@@ -718,8 +721,11 @@ static void GC_CollectGarbage(ForkGcCtx *gc){
       NumericRangeNode *currNode = NULL;
 
       uint64_t numericNodes = 0;
-      // inverted numeric field name
+      // numeric field name
       GC_FDWriteBuffer(gc->pipefd[1], numericFields[i]->name, strlen(numericFields[i]->name));
+      // numeric field unique id
+      GC_FDWriteLongLong(gc->pipefd[1], rt->uniqueId);
+
       while((currNode = NumericRangeTreeIterator_Next(gcIterator))){
         ++numericNodes;
         if(!currNode->range){
@@ -779,6 +785,61 @@ typedef struct ModifiedBlock{
   IndexBlock blk;
 }ModifiedBlock;
 
+typedef struct{
+  long long bytesCollected;
+  long long docsCollected;
+  ModifiedBlock* blocksModified;
+}GC_InvertedIndexData;
+
+static void GC_ReadModifiedBlock(ForkGcCtx *gc, ModifiedBlock* blockModified){
+  blockModified->blockIndex = GC_FDReadLongLong(gc->pipefd[0]);
+  blockModified->blk.firstId = GC_FDReadLongLong(gc->pipefd[0]);
+  blockModified->blk.lastId = GC_FDReadLongLong(gc->pipefd[0]);
+  blockModified->blk.numDocs = GC_FDReadLongLong(gc->pipefd[0]);
+  blockModified->numBlocksBefore = GC_FDReadLongLong(gc->pipefd[0]);
+  size_t cap;
+  char* data = GC_FDReadBuffer(gc->pipefd[0], &cap);
+  blockModified->blk.data = malloc(sizeof(Buffer));
+  blockModified->blk.data->offset = GC_FDReadLongLong(gc->pipefd[0]);;
+  blockModified->blk.data->cap = cap;
+  blockModified->blk.data->data = data;
+// todo: think what to do with this statistics
+  if(data == NULL){
+    gc->gc->stats.totalEmptyBlocksInNumericTrees++;
+  }
+}
+
+static bool GC_ReadInvertedIndexFromFork(ForkGcCtx *gc, GC_InvertedIndexData* idxData){
+  long long blocksModifiedSize = GC_FDReadLongLong(gc->pipefd[0]);
+  if(blocksModifiedSize == 0){
+    return false;
+  }
+
+  idxData->bytesCollected = GC_FDReadLongLong(gc->pipefd[0]);
+  idxData->docsCollected = GC_FDReadLongLong(gc->pipefd[0]);
+  GC_FDReadLongLong(gc->pipefd[0]); //throw totalblocks in inverted index
+
+  idxData->blocksModified = array_new(ModifiedBlock, blocksModifiedSize);
+  for(int i = 0 ; i < blocksModifiedSize ; ++i){
+    GC_ReadModifiedBlock(gc, idxData->blocksModified + i);
+  }
+  return true;
+}
+
+static void GC_FixInvertedIndex(GC_InvertedIndexData* idxData, InvertedIndex *idx){
+  for(int i = 0 ; i < array_len(idxData->blocksModified) ; ++i){
+    if(idxData->blocksModified[i].numBlocksBefore == idx->blocks[idxData->blocksModified[i].blockIndex].numDocs){
+      indexBlock_Free(&idx->blocks[idxData->blocksModified[i].blockIndex]);
+      idx->blocks[idxData->blocksModified[i].blockIndex].data = idxData->blocksModified[i].blk.data;
+      idx->blocks[idxData->blocksModified[i].blockIndex].firstId = idxData->blocksModified[i].blk.firstId;
+      idx->blocks[idxData->blocksModified[i].blockIndex].lastId = idxData->blocksModified[i].blk.lastId;
+      idx->blocks[idxData->blocksModified[i].blockIndex].numDocs = idxData->blocksModified[i].blk.numDocs;
+    }else{
+      Buffer_Free(idxData->blocksModified[i].blk.data);
+    }
+  }
+}
+
 bool GC_ReadInvertedIndex(ForkGcCtx *gc){
   size_t len;
   char* term = GC_FDReadBuffer(gc->pipefd[0], &len);
@@ -788,71 +849,37 @@ bool GC_ReadInvertedIndex(ForkGcCtx *gc){
     }
     return false;
   }
-  long long blocksModifiedSize = GC_FDReadLongLong(gc->pipefd[0]);
-  if(blocksModifiedSize == 0){
+
+  GC_InvertedIndexData idxData = {0};
+  if(!GC_ReadInvertedIndexFromFork(gc, &idxData)){
     rm_free(term);
     return true;
   }
 
-  long long bytesCollected = GC_FDReadLongLong(gc->pipefd[0]);
-  long long docsCollected = GC_FDReadLongLong(gc->pipefd[0]);
-  GC_FDReadLongLong(gc->pipefd[0]); //throw
-
-  ModifiedBlock blocksModified[blocksModifiedSize];
-  for(int i = 0 ; i < blocksModifiedSize ; ++i){
-    blocksModified[i].blockIndex = GC_FDReadLongLong(gc->pipefd[0]);
-    blocksModified[i].blk.firstId = GC_FDReadLongLong(gc->pipefd[0]);
-    blocksModified[i].blk.lastId = GC_FDReadLongLong(gc->pipefd[0]);
-    blocksModified[i].blk.numDocs = GC_FDReadLongLong(gc->pipefd[0]);
-    blocksModified[i].numBlocksBefore = GC_FDReadLongLong(gc->pipefd[0]);
-    size_t cap;
-    char* data = GC_FDReadBuffer(gc->pipefd[0], &cap);
-    blocksModified[i].blk.data = malloc(sizeof(Buffer));
-    blocksModified[i].blk.data->offset = GC_FDReadLongLong(gc->pipefd[0]);;
-    blocksModified[i].blk.data->cap = cap;
-    blocksModified[i].blk.data->data = data;
-    if(data == NULL){
-      gc->gc->stats.totalEmptyBlocksInNumericTrees++;
-    }
-  }
-
-  RedisModuleCtx *rctx = RedisModule_GetThreadSafeContext(NULL);
+  RedisModuleCtx *rctx = NULL;
+  rctx = RedisModule_GetThreadSafeContext(NULL);
   RedisModule_ThreadSafeContextLock(rctx);
   RedisModuleKey *idxKey = NULL;
-  RedisSearchCtx *sctx = NewSearchCtx(rctx, (RedisModuleString *)gc->keyName);
+  RedisSearchCtx *sctx = NULL;
+  sctx = NewSearchCtx(rctx, (RedisModuleString *)gc->keyName);
   if (!sctx || sctx->spec->unique_id != gc->gc->spec_unique_id) {
-    // index change just return
-    RedisModule_ThreadSafeContextUnlock(rctx);
-    if(idxKey){
-      RedisModule_CloseKey(idxKey);
-    }
-    if (sctx) {
-      RedisModule_CloseKey(sctx->key);
-      SearchCtx_Free(sctx);
-    }
-    if(term){
-      rm_free(term);
-    }
-    RedisModule_FreeThreadSafeContext(rctx);
-    return false;
+    goto cleanup;
   }
+
   InvertedIndex *idx = Redis_OpenInvertedIndexEx(sctx, term, strlen(term), 1, &idxKey);
 
-  for(int i = 0 ; i < blocksModifiedSize ; ++i){
-    if(blocksModified[i].numBlocksBefore == idx->blocks[blocksModified[i].blockIndex].numDocs){
-      indexBlock_Free(&idx->blocks[blocksModified[i].blockIndex]);
-      idx->blocks[blocksModified[i].blockIndex].data = blocksModified[i].blk.data;
-      idx->blocks[blocksModified[i].blockIndex].firstId = blocksModified[i].blk.firstId;
-      idx->blocks[blocksModified[i].blockIndex].lastId = blocksModified[i].blk.lastId;
-      idx->blocks[blocksModified[i].blockIndex].numDocs = blocksModified[i].blk.numDocs;
-    }else{
-      Buffer_Free(blocksModified[i].blk.data);
-    }
+  if(idx == NULL){
+    goto cleanup;
   }
 
-  gc_updateStats(sctx, gc->gc, docsCollected, bytesCollected);
+  GC_FixInvertedIndex(&idxData, idx);
 
-  RedisModule_ThreadSafeContextUnlock(rctx);
+  gc_updateStats(sctx, gc->gc, idxData.docsCollected, idxData.bytesCollected);
+
+cleanup:
+  if(rctx){
+    RedisModule_ThreadSafeContextUnlock(rctx);
+  }
 
   if(idxKey){
     RedisModule_CloseKey(idxKey);
@@ -864,7 +891,13 @@ bool GC_ReadInvertedIndex(ForkGcCtx *gc){
   if(term){
     rm_free(term);
   }
-  RedisModule_FreeThreadSafeContext(rctx);
+  if(rctx){
+    RedisModule_FreeThreadSafeContext(rctx);
+  }
+  if(idxData.blocksModified){
+    array_free(idxData.blocksModified);
+  }
+
   return true;
 }
 
@@ -878,33 +911,14 @@ bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
     return false;
   }
 
+  uint64_t rtUniqueId = GC_FDReadLongLong(gc->pipefd[0]);
+
+  RedisModuleCtx *rctx = RedisModule_GetThreadSafeContext(NULL);
   NumericRangeNode *currNode = NULL;
   while((currNode = (NumericRangeNode *)GC_FDReadLongLong(gc->pipefd[0]))){
-    long long blocksModifiedSize = GC_FDReadLongLong(gc->pipefd[0]);
-    if(blocksModifiedSize == 0){
+    GC_InvertedIndexData idxData = {0};
+    if(!GC_ReadInvertedIndexFromFork(gc, &idxData)){
       continue;
-    }
-
-    long long bytesCollected = GC_FDReadLongLong(gc->pipefd[0]);
-    long long docsCollected = GC_FDReadLongLong(gc->pipefd[0]);
-    gc->totalBlocksInNumericTrees += GC_FDReadLongLong(gc->pipefd[0]);
-
-    ModifiedBlock blocksModified[blocksModifiedSize];
-    for(int i = 0 ; i < blocksModifiedSize ; ++i){
-      blocksModified[i].blockIndex = GC_FDReadLongLong(gc->pipefd[0]);
-      blocksModified[i].blk.firstId = GC_FDReadLongLong(gc->pipefd[0]);
-      blocksModified[i].blk.lastId = GC_FDReadLongLong(gc->pipefd[0]);
-      blocksModified[i].blk.numDocs = GC_FDReadLongLong(gc->pipefd[0]);
-      blocksModified[i].numBlocksBefore = GC_FDReadLongLong(gc->pipefd[0]);
-      size_t cap;
-      char* data = GC_FDReadBuffer(gc->pipefd[0], &cap);
-      blocksModified[i].blk.data = malloc(sizeof(Buffer));
-      blocksModified[i].blk.data->offset = GC_FDReadLongLong(gc->pipefd[0]);;
-      blocksModified[i].blk.data->cap = cap;
-      blocksModified[i].blk.data->data = data;
-      if(data == NULL){
-        gc->gc->stats.totalEmptyBlocksInNumericTrees++;
-      }
     }
 
     // read reduced cardinality size
@@ -916,45 +930,48 @@ bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
       valuesDeleted[i] = GC_FDReadLongLong(gc->pipefd[0]);
     }
 
-    RedisModuleCtx *rctx = RedisModule_GetThreadSafeContext(NULL);
     RedisModule_ThreadSafeContextLock(rctx);
     RedisSearchCtx *sctx = NewSearchCtx(rctx, (RedisModuleString *)gc->keyName);
     if (!sctx || sctx->spec->unique_id != gc->gc->spec_unique_id) {
-      // index change just return
       RedisModule_ThreadSafeContextUnlock(rctx);
       if (sctx) {
         RedisModule_CloseKey(sctx->key);
         SearchCtx_Free(sctx);
       }
       RedisModule_FreeThreadSafeContext(rctx);
+      if(idxData.blocksModified){
+        array_free(idxData.blocksModified);
+      }
       return false;
     }
 
-    if(!currNode->range){
-      gc->gc->stats.gcNumericNodesMissed++;
+    FieldSpec *fs = IndexSpec_GetField(sctx->spec, fieldName, strlen(fieldName));
+    RedisModuleString *keyName = IndexSpec_GetFormattedKey(sctx->spec, fs);
+    RedisModuleKey **idxKey;
+    NumericRangeTree *rt = OpenNumericIndex(sctx, keyName, &idxKey);
+
+    if(rt->uniqueId != rtUniqueId){
       RedisModule_ThreadSafeContextUnlock(rctx);
       if (sctx) {
         RedisModule_CloseKey(sctx->key);
         SearchCtx_Free(sctx);
       }
       RedisModule_FreeThreadSafeContext(rctx);
-      continue;
-    }
-
-    for(int i = 0 ; i < blocksModifiedSize ; ++i){
-      if(blocksModified[i].numBlocksBefore == currNode->range->entries->blocks[blocksModified[i].blockIndex].numDocs){
-        indexBlock_Free(&currNode->range->entries->blocks[blocksModified[i].blockIndex]);
-        currNode->range->entries->blocks[blocksModified[i].blockIndex].data = blocksModified[i].blk.data;
-        currNode->range->entries->blocks[blocksModified[i].blockIndex].firstId = blocksModified[i].blk.firstId;
-        currNode->range->entries->blocks[blocksModified[i].blockIndex].lastId = blocksModified[i].blk.lastId;
-        currNode->range->entries->blocks[blocksModified[i].blockIndex].numDocs = blocksModified[i].blk.numDocs;
-      }else{
-        gc->gc->stats.gcBlockDenied++;
-        Buffer_Free(blocksModified[i].blk.data);
+      if(idxData.blocksModified){
+        array_free(idxData.blocksModified);
       }
+      return false;
     }
 
 
+    if(!currNode->range){
+      gc->gc->stats.gcNumericNodesMissed++; // todo: think if its needed here
+      goto loop_cleanup;
+    }
+
+    GC_FixInvertedIndex(&idxData, currNode->range->entries);
+
+    // fixing cardinality
     uint16_t newCard = 0;
     CardinalityValue* newCardValues = array_new(CardinalityValue, currNode->range->splitCard);
     for(int i = 0 ; i < array_len(currNode->range->values) ; ++i){
@@ -975,20 +992,27 @@ bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
     currNode->range->values = newCardValues;
     currNode->range->card = newCard;
 
-    gc_updateStats(sctx, gc->gc, docsCollected, bytesCollected);
-
+loop_cleanup:
     RedisModule_ThreadSafeContextUnlock(rctx);
-
-
     if (sctx) {
       RedisModule_CloseKey(sctx->key);
       SearchCtx_Free(sctx);
     }
-    RedisModule_FreeThreadSafeContext(rctx);
+    if(idxData.blocksModified){
+      array_free(idxData.blocksModified);
+    }
+    if(keyName){
+      RedisModule_FreeString(rctx, keyName);
+    }
+    if(idxKey){
+      RedisModule_CloseKey(idxKey);
+    }
   }
 
   // read number of numeric nodes
-  gc->totalNodesInNumericTrees += GC_FDReadLongLong(gc->pipefd[0]);
+  gc->totalNodesInNumericTrees += GC_FDReadLongLong(gc->pipefd[0]); // think if we need this here
+
+  RedisModule_FreeThreadSafeContext(rctx);
 
   if(fieldName){
     rm_free(fieldName);
@@ -1033,6 +1057,7 @@ void GC_StartForkGC(ForkGcCtx *gc){
   gc->gc->stats.totalMSRun += msRun;
   gc->gc->stats.lastRunTimeMs = msRun;
 
+  // todo: handle updating the timer
   // if we didn't remove anything - reduce the frequency a bit.
   // if we did  - increase the frequency a bit
 //  if (gc->gc->timer) {
@@ -1045,6 +1070,8 @@ void GC_StartForkGC(ForkGcCtx *gc){
 //    RMUtilTimer_SetInterval(gc->gc->timer, hzToTimeSpec(gc->gc->hz));
 //  }
 
+
+  // todo: think if its needed here
   if(gc->gc->stats.totalNodesInNumericTrees < gc->totalNodesInNumericTrees){
     gc->gc->stats.totalNodesInNumericTrees = gc->totalNodesInNumericTrees;
   }

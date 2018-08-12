@@ -271,6 +271,8 @@ void NumericRangeNode_Free(NumericRangeNode *n) {
   RedisModule_Free(n);
 }
 
+uint16_t numericTreesUniqueId = 0;
+
 /* Create a new numeric range tree */
 NumericRangeTree *NewNumericRangeTree() {
 #define GC_NODES_INITIAL_SIZE 10
@@ -281,6 +283,7 @@ NumericRangeTree *NewNumericRangeTree() {
   ret->numRanges = 1;
   ret->revisionId = 0;
   ret->lastDocId = 0;
+  ret->uniqueId = numericTreesUniqueId++;
   return ret;
 }
 

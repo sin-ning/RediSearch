@@ -62,6 +62,8 @@ typedef struct {
 
   uint32_t revisionId;
 
+  uint32_t uniqueId;
+
 } NumericRangeTree;
 
 #define NumericRangeNode_IsLeaf(n) (n->left == NULL && n->right == NULL)
