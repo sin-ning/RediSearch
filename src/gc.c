@@ -915,7 +915,14 @@ bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
 
   RedisModuleCtx *rctx = RedisModule_GetThreadSafeContext(NULL);
   NumericRangeNode *currNode = NULL;
+  bool shouldReturn = false;
   while((currNode = (NumericRangeNode *)GC_FDReadLongLong(gc->pipefd[0]))){
+
+// performs cleanup and return
+#define RETURN shouldReturn = true; goto loop_cleanup;
+// performs cleanup and continue with the loop
+#define CONTINUE goto loop_cleanup;
+
     GC_InvertedIndexData idxData = {0};
     if(!GC_ReadInvertedIndexFromFork(gc, &idxData)){
       continue;
@@ -933,40 +940,21 @@ bool GC_ReadNumericInvertedIndex(ForkGcCtx *gc){
     RedisModule_ThreadSafeContextLock(rctx);
     RedisSearchCtx *sctx = NewSearchCtx(rctx, (RedisModuleString *)gc->keyName);
     if (!sctx || sctx->spec->unique_id != gc->gc->spec_unique_id) {
-      RedisModule_ThreadSafeContextUnlock(rctx);
-      if (sctx) {
-        RedisModule_CloseKey(sctx->key);
-        SearchCtx_Free(sctx);
-      }
-      RedisModule_FreeThreadSafeContext(rctx);
-      if(idxData.blocksModified){
-        array_free(idxData.blocksModified);
-      }
-      return false;
+      RETURN;
     }
 
-    FieldSpec *fs = IndexSpec_GetField(sctx->spec, fieldName, strlen(fieldName));
-    RedisModuleString *keyName = IndexSpec_GetFormattedKey(sctx->spec, fs);
-    RedisModuleKey **idxKey;
+    RedisModuleString *keyName = fmtRedisNumericIndexKey(sctx, fieldName);
+    RedisModuleKey *idxKey = NULL;
     NumericRangeTree *rt = OpenNumericIndex(sctx, keyName, &idxKey);
 
     if(rt->uniqueId != rtUniqueId){
-      RedisModule_ThreadSafeContextUnlock(rctx);
-      if (sctx) {
-        RedisModule_CloseKey(sctx->key);
-        SearchCtx_Free(sctx);
-      }
-      RedisModule_FreeThreadSafeContext(rctx);
-      if(idxData.blocksModified){
-        array_free(idxData.blocksModified);
-      }
-      return false;
+      RETURN;
     }
 
 
     if(!currNode->range){
       gc->gc->stats.gcNumericNodesMissed++; // todo: think if its needed here
-      goto loop_cleanup;
+      CONTINUE;
     }
 
     GC_FixInvertedIndex(&idxData, currNode->range->entries);
@@ -1006,6 +994,10 @@ loop_cleanup:
     }
     if(idxKey){
       RedisModule_CloseKey(idxKey);
+    }
+    if(shouldReturn){
+      RedisModule_FreeThreadSafeContext(rctx);
+      return false;
     }
   }
 
