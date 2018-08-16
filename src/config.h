@@ -10,6 +10,11 @@ typedef enum {
   TimeoutPolicy_Fail          // Just fail without returning anything
 } RSTimeoutPolicy;
 
+typedef enum {
+  GCPolicy_Default = 0,
+  GCPolicy_Fork,
+} GCPolicy;
+
 static inline const char *TimeoutPolicy_ToString(RSTimeoutPolicy policy) {
   switch (policy) {
     case TimeoutPolicy_Return:
@@ -60,6 +65,8 @@ typedef struct {
   size_t gcScanSize;
 
   size_t minPhoneticTermLen;
+
+  GCPolicy gcPolicy;
 } RSConfig;
 
 typedef enum {
@@ -126,7 +133,8 @@ sds RSConfig_GetInfoString(const RSConfig *config);
     .cursorReadSize = 1000, .cursorMaxIdle = 300000, .maxDocTableSize = DEFAULT_DOC_TABLE_SIZE, \
     .searchPoolSize = CONCURRENT_SEARCH_POOL_DEFAULT_SIZE,                                      \
     .indexPoolSize = CONCURRENT_INDEX_POOL_DEFAULT_SIZE, .poolSizeNoAuto = 0,                   \
-    .gcScanSize = GC_SCANSIZE, .minPhoneticTermLen = DEFAULT_MIN_PHONETIC_TERM_LEN              \
+    .gcScanSize = GC_SCANSIZE, .minPhoneticTermLen = DEFAULT_MIN_PHONETIC_TERM_LEN,             \
+    .gcPolicy = GCPolicy_Default                                                                \
   }
 
 #endif

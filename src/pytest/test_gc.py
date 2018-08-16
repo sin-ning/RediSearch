@@ -60,7 +60,7 @@ class SearchGCTestCase(BaseSearchTestCase):
         for i in range(0, NumberOfDocs, 2):
             self.assertEqual(self.cmd('ft.del', 'idx', 'doc%d' % i), 1)
 
-        time.sleep(1)
+        time.sleep(3)
 
         res = self.cmd('ft.debug', 'DUMP_TAGIDX', 'idx', 't')
         for r1 in res:

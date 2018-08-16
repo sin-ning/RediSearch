@@ -120,8 +120,6 @@ static void DumpNumericIndex(RedisSearchCtx *sctx, RedisModuleString *fieldNameR
   RedisModule_ReplyWithArray(sctx->redisCtx, REDISMODULE_POSTPONED_ARRAY_LEN);
   while ((currNode = NumericRangeTreeIterator_Next(iter))) {
     if (currNode->range) {
-      RedisModule_ReplyWithArray(sctx->redisCtx, 2);
-      RedisModule_ReplyWithLongLong(sctx->redisCtx, currNode->range->entries->size);
       IndexReader *reader = NewNumericReader(currNode->range->entries, NULL);
       ReplyReaderResults(reader, sctx->redisCtx);
       ++resultSize;

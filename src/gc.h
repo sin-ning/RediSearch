@@ -3,11 +3,12 @@
 
 #include "redismodule.h"
 #include "rmutil/periodic.h"
+#include "spec.h"
 
 // the maximum frequency we are allowed to run in
-#define GC_MAX_HZ 1
-#define GC_MIN_HZ 0.001
-#define GC_DEFAULT_HZ 1
+#define GC_MAX_HZ 100
+#define GC_MIN_HZ 1
+#define GC_DEFAULT_HZ 10
 
 #define NUM_CYCLES_HISTORY 10
 
@@ -19,46 +20,31 @@ typedef struct {
   // the number of cycles that collected anything
   size_t effectiveCycles;
 
-  long long totalMSRun;
-  long long lastRunTimeMs;
-
   // the collection result of the last N cycles.
   // this is a cyclical buffer
   size_t history[NUM_CYCLES_HISTORY];
   // the offset in the history cyclical buffer
   int historyOffset;
-
-  uint64_t totalNodesInNumericTrees;
-  uint64_t totalBlocksInNumericTrees;
-  uint64_t totalEmptyBlocksInNumericTrees;
-  uint64_t gcNumericNodesMissed;
-  uint64_t gcBlockDenied;
 } GCStats;
 
-#ifndef RS_GC_C_
 typedef struct GarbageCollectorCtx GarbageCollectorCtx;
 
+typedef struct gc gc;
+
 /* Create a new garbage collector, with a string for the index name, and initial frequency */
-GarbageCollectorCtx *NewGarbageCollector(const RedisModuleString *k, float initial_hz,
-                                         uint64_t spec_unique_id);
+gc NewGarbageCollector(const RedisModuleString *k, float initial_hz, uint64_t spec_unique_id);
 
 // Start the collector thread
-int GC_Start(GarbageCollectorCtx *ctx);
+int GC_Start(void *ctx);
 
 /* Stop the garbage collector, and call its termination function asynchronously when its thread is
  * finished. This also frees the resources allocated for the GC context */
-int GC_Stop(GarbageCollectorCtx *ctx);
-
-// get the current stats from the collector
-const struct GCStats *GC_GetStats(GarbageCollectorCtx *ctx);
+int GC_Stop(void *ctx);
 
 // called externally when the user deletes a document to hint at increasing the HZ
-void GC_OnDelete(GarbageCollectorCtx *ctx);
+void GC_OnDelete(void *ctx);
 
 /* Render the GC stats to a redis connection, used by FT.INFO */
-void GC_RenderStats(RedisModuleCtx *ctx, GarbageCollectorCtx *gc);
+void GC_RenderStats(RedisModuleCtx *ctx, void *gc);
 
-void GC_StartForkGC(GarbageCollectorCtx *gc);
-
-#endif  // RS_GC_C_
 #endif

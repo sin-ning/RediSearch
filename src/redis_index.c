@@ -175,7 +175,7 @@ RedisSearchCtx *NewSearchCtxDefault(RedisModuleCtx *ctx) {
 }
 
 void SearchCtx_Free(RedisSearchCtx *sctx) {
-  RedisModule_FreeString(sctx->redisCtx, sctx->keyName);
+  //RedisModule_FreeString(sctx->redisCtx, sctx->keyName);
   rm_free(sctx);
 }
 /*
