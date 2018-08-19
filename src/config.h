@@ -26,6 +26,17 @@ static inline const char *TimeoutPolicy_ToString(RSTimeoutPolicy policy) {
   }
 }
 
+static inline const char *GCPolicy_ToString(GCPolicy policy) {
+  switch (policy) {
+    case GCPolicy_Default:
+      return "default";
+    case GCPolicy_Fork:
+      return "fork";
+    default:
+      return "huh?";
+  }
+}
+
 /* RSConfig is a global configuration struct for the module, it can be included from each file, and
  * is initialized with user config options during module statrtup */
 typedef struct {

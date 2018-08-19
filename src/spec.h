@@ -175,6 +175,7 @@ typedef struct gc{
   int (*stop)(void* ctx);
   void (*renderStats)(RedisModuleCtx *ctx, void *gc);
   void (*onDelete)(void *ctx);
+  void (*forceInvoke)(void *ctx, RedisModuleBlockedClient *rctx);
 }gc;
 
 typedef struct {

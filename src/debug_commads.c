@@ -150,6 +150,28 @@ static void DumpPhoneticHash(RedisModuleCtx *ctx, RedisModuleString *term) {
   free(secondary);
 }
 
+static int GCForceInvokeReply(RedisModuleCtx *ctx, RedisModuleString **argv, int argc){
+#define REPLY "DONE"
+  RedisModule_ReplyWithStringBuffer(ctx, REPLY, strlen(REPLY));
+  return REDISMODULE_OK;
+}
+
+static int GCForceInvokeReplyTimeout(RedisModuleCtx *ctx, RedisModuleString **argv, int argc){
+#define ERROR_REPLY "INVOCATION FAILED"
+  RedisModule_ReplyWithError(ctx, ERROR_REPLY);
+  return REDISMODULE_OK;
+}
+
+static void GCForceInvoke(RedisModuleCtx *ctx, RedisModuleString *idx){
+#define INVOKATION_TIMEOUT 10000000 // gc invocation timeout ms
+  IndexSpec *sp = IndexSpec_Load(ctx, RedisModule_StringPtrLen(idx, NULL), 0);
+  if (!sp) {
+    RedisModule_ReplyWithError(ctx, "Unknown index name");
+  }
+  RedisModuleBlockedClient *bc = RedisModule_BlockClient(ctx, GCForceInvokeReply, GCForceInvokeReplyTimeout, NULL, INVOKATION_TIMEOUT);
+  sp->gc.forceInvoke(sp->gc.gcCtx, bc);
+}
+
 int DebugCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
 
   const char *subCommand = NULL;
@@ -158,6 +180,8 @@ int DebugCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     subCommand = RedisModule_StringPtrLen(argv[1], NULL);
     if (strcmp(subCommand, DUMP_PHONETIC_HASH) == 0) {
       DumpPhoneticHash(ctx, argv[2]);
+    } else if (strcmp(subCommand, GC_FORCEINVOKE) == 0) {
+      GCForceInvoke(ctx, argv[2]);
     } else {
       RedisModule_ReplyWithError(ctx, "no such subcommand");
     }

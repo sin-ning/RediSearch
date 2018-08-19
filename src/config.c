@@ -236,6 +236,26 @@ CONFIG_GETTER(getMinPhoneticTermLen) {
   return sdscatprintf(ss, "%lu", config->minPhoneticTermLen);
 }
 
+CONFIG_SETTER(setGcPolicy) {
+  if (*offset == argc) {
+    RETURN_ERROR("Missing argument");
+  }
+  const char *policy = RedisModule_StringPtrLen(argv[(*offset)++], NULL);
+  if (!strcasecmp(policy, "DEFAULT")) {
+    config->gcPolicy = GCPolicy_Default;
+  } else if (!strcasecmp(policy, "FORK")) {
+    config->gcPolicy = GCPolicy_Fork;
+  } else {
+    RETURN_ERROR("Invalid GC Policy value");
+    return REDISMODULE_ERR;
+  }
+  return REDISMODULE_OK;
+}
+
+CONFIG_GETTER(getGcPolicy) {
+  return sdsnew(GCPolicy_ToString(config->gcPolicy));
+}
+
 RSConfig RSGlobalConfig = RS_DEFAULT_CONFIG;
 
 static RSConfigVar *findConfigVar(const RSConfigVar *vars, const char *name) {
@@ -277,6 +297,7 @@ int ReadConfig(RedisModuleString **argv, int argc, char **err) {
     // Mark the option as having been modified
     curVar->flags |= RSCONFIGVAR_F_MODIFIED;
   }
+
   return REDISMODULE_OK;
 }
 
@@ -345,6 +366,11 @@ RSConfigOptions RSGlobalConfigOptions = {
          .helpText = "Minumum length of term to be considered for phonetic matching",
          .setValue = setMinPhoneticTermLen,
          .getValue = getMinPhoneticTermLen},
+        {.name = "GC_POLICY",
+         .helpText = "gc policy to use (DEFAULT/FORK)",
+         .setValue = setGcPolicy,
+         .getValue = getGcPolicy,
+         .flags = RSCONFIGVAR_F_IMMUTABLE},
         {.name = NULL}}};
 
 sds RSConfig_GetInfoString(const RSConfig *config) {

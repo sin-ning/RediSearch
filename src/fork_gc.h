@@ -21,7 +21,7 @@ typedef struct {
   long long lastRunTimeMs;
 
   uint64_t gcNumericNodesMissed;
-  uint64_t gcBlockDenied;
+  uint64_t gcBlocksDenied;
 } ForkGCStats;
 
 /* Internal definition of the garbage collector context (each index has one) */
@@ -43,6 +43,8 @@ typedef struct ForkGCCtx {
 
   int pipefd[2];
 
+  bool noLockMode;
+
 } ForkGCCtx;
 
 typedef struct gc gc;
@@ -52,5 +54,6 @@ int ForkGc_StartForkGC(void *ctx);
 int ForkGc_StopForkGC(void *ctx);
 void ForkGc_RenderStats(RedisModuleCtx *ctx, void *gcCtx);
 void ForkGc_OnDelete(void *ctx);
+void ForkGc_ForceInvoke(void *ctx, RedisModuleBlockedClient *bClient);
 
 #endif /* SRC_FORK_GC_H_ */

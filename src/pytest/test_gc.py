@@ -1,4 +1,4 @@
-import redis
+import redis    
 import unittest
 from hotels import hotels
 import random
@@ -26,7 +26,9 @@ class SearchGCTestCase(BaseSearchTestCase):
 
         self.assertEqual(self.cmd('ft.del', 'idx', 'doc2'), 1)
 
-        time.sleep(1)
+        for i in range(100):
+            # gc is random so we need to do it long enough times for it to work
+            self.cmd('ft.debug', 'GC_FORCEINVOKE', 'idx')
 
         # check that the gc collected the deleted docs
         self.assertEqual(self.cmd('ft.debug', 'DUMP_INVIDX', 'idx', 'world'), [1])
@@ -43,7 +45,8 @@ class SearchGCTestCase(BaseSearchTestCase):
         for i in range(0, NumberOfDocs, 2):
             self.assertEqual(self.cmd('ft.del', 'idx', 'doc%d' % i), 1)
 
-        time.sleep(1)
+        for i in range(100):
+            self.cmd('ft.debug', 'GC_FORCEINVOKE', 'idx')
 
         res = self.cmd('ft.debug', 'DUMP_NUMIDX', 'idx', 'id')
         for r1 in res:
@@ -60,7 +63,9 @@ class SearchGCTestCase(BaseSearchTestCase):
         for i in range(0, NumberOfDocs, 2):
             self.assertEqual(self.cmd('ft.del', 'idx', 'doc%d' % i), 1)
 
-        time.sleep(3)
+        for i in range(100):
+            # gc is random so we need to do it long enough times for it to work
+            self.cmd('ft.debug', 'GC_FORCEINVOKE', 'idx')
 
         res = self.cmd('ft.debug', 'DUMP_TAGIDX', 'idx', 't')
         for r1 in res:

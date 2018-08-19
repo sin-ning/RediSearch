@@ -60,6 +60,8 @@ typedef struct GarbageCollectorCtx {
 
   uint64_t spec_unique_id;
 
+  bool noLockMode;
+
 } GarbageCollectorCtx;
 
 /* Create a new garbage collector, with a string for the index name, and initial frequency */
@@ -72,6 +74,7 @@ gc NewGarbageCollector(const RedisModuleString *k, float initialHZ, uint64_t spe
       .keyName = k,
       .stats = {0},
       .rdbPossiblyLoading = 1,
+      .noLockMode = false,
   };
 
   gcCtx->numericGCCtx = array_new(NumericFieldGCCtx *, NUMERIC_GC_INITIAL_SIZE);
@@ -83,6 +86,7 @@ gc NewGarbageCollector(const RedisModuleString *k, float initialHZ, uint64_t spe
     .stop = GC_Stop,
     .renderStats = GC_RenderStats,
     .onDelete = GC_OnDelete,
+    .forceInvoke = GC_ForceInvoke,
   };
 }
 
@@ -477,6 +481,11 @@ void GC_OnDelete(void *ctx) {
   GarbageCollectorCtx *gc = ctx;
   if (!gc) return;
   gc->hz = MIN(gc->hz * 1.5, GC_MAX_HZ);
+}
+
+void GC_ForceInvoke(void *ctx, RedisModuleBlockedClient *bc){
+  GarbageCollectorCtx *gc = ctx;
+  RMUtilTimer_ForceInvoke(gc->timer, bc);
 }
 
 void GC_RenderStats(RedisModuleCtx *ctx, void *gcCtx) {

@@ -44,6 +44,8 @@ int GC_Stop(void *ctx);
 // called externally when the user deletes a document to hint at increasing the HZ
 void GC_OnDelete(void *ctx);
 
+void GC_ForceInvoke(void *ctx, RedisModuleBlockedClient *bClient);
+
 /* Render the GC stats to a redis connection, used by FT.INFO */
 void GC_RenderStats(RedisModuleCtx *ctx, void *gc);
 
