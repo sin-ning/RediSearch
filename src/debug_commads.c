@@ -163,7 +163,7 @@ static int GCForceInvokeReplyTimeout(RedisModuleCtx *ctx, RedisModuleString **ar
 }
 
 static void GCForceInvoke(RedisModuleCtx *ctx, RedisModuleString *idx){
-#define INVOKATION_TIMEOUT 10000000 // gc invocation timeout ms
+#define INVOKATION_TIMEOUT 30000 // gc invocation timeout ms
   IndexSpec *sp = IndexSpec_Load(ctx, RedisModule_StringPtrLen(idx, NULL), 0);
   if (!sp) {
     RedisModule_ReplyWithError(ctx, "Unknown index name");

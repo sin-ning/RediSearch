@@ -1289,7 +1289,8 @@ class SearchTestCase(BaseSearchTestCase):
             return d
 
         stats = get_stats(r)
-        self.assertGreater(stats['gc_stats']['current_hz'], 8)
+        if('current_hz' in stats['gc_stats']):
+            self.assertGreater(stats['gc_stats']['current_hz'], 8)
         self.assertEqual(0, stats['gc_stats']['bytes_collected'])
         self.assertGreater(int(stats['num_records']), 0)
 
@@ -1303,11 +1304,19 @@ class SearchTestCase(BaseSearchTestCase):
             stats = get_stats(r)
             if stats['num_records'] == '0':
                 break
+
+        for i in range(100):
+            # gc is random so we need to do it long enough times for it to work
+            self.cmd('ft.debug', 'GC_FORCEINVOKE', 'idx')
+
+        stats = get_stats(r)
+
         self.assertEqual(0, int(stats['num_docs']))
         self.assertEqual(0, int(stats['num_records']))
         if not self.is_cluster():
             self.assertEqual(100, int(stats['max_doc_id']))
-            self.assertGreater(stats['gc_stats']['current_hz'], 50)
+            if('current_hz' in stats['gc_stats']):
+                self.assertGreater(stats['gc_stats']['current_hz'], 30)
             currentIndexSize = float(stats['inverted_sz_mb']) * 1024 * 1024
             # print initialIndexSize, currentIndexSize,
             # stats['gc_stats']['bytes_collected']

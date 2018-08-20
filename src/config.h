@@ -78,6 +78,7 @@ typedef struct {
   size_t minPhoneticTermLen;
 
   GCPolicy gcPolicy;
+  GCPolicy forkGcRunIntervalSec;
 } RSConfig;
 
 typedef enum {
@@ -136,6 +137,7 @@ sds RSConfig_GetInfoString(const RSConfig *config);
 #define CONCURRENT_INDEX_MAX_POOL_SIZE 200  // Maximum number of threads to create
 #define GC_SCANSIZE 100
 #define DEFAULT_MIN_PHONETIC_TERM_LEN 3
+#define DEFAULT_FORK_GC_RUN_INTERVAL 10
 // default configuration
 #define RS_DEFAULT_CONFIG                                                                       \
   {                                                                                             \
@@ -145,7 +147,7 @@ sds RSConfig_GetInfoString(const RSConfig *config);
     .searchPoolSize = CONCURRENT_SEARCH_POOL_DEFAULT_SIZE,                                      \
     .indexPoolSize = CONCURRENT_INDEX_POOL_DEFAULT_SIZE, .poolSizeNoAuto = 0,                   \
     .gcScanSize = GC_SCANSIZE, .minPhoneticTermLen = DEFAULT_MIN_PHONETIC_TERM_LEN,             \
-    .gcPolicy = GCPolicy_Default                                                                \
+    .gcPolicy = GCPolicy_Default, .forkGcRunIntervalSec = DEFAULT_FORK_GC_RUN_INTERVAL          \
   }
 
 #endif

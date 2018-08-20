@@ -4,6 +4,7 @@
 #include "inverted_index.h"
 #include "redis_index.h"
 #include "numeric_index.h"
+#include "tag_index.h"
 #include "tests/time_sample.h"
 #include <stdlib.h>
 #include <stdbool.h>
@@ -223,6 +224,44 @@ static void ForkGc_CollectGarbageFromNumIdx(ForkGCCtx *gc, RedisSearchCtx *sctx)
   ForkGc_FDWriteBuffer(gc->pipefd[1], "\0", 1);
 }
 
+static void ForkGc_CollectGarbageFromTagIdx(ForkGCCtx *gc, RedisSearchCtx *sctx){
+  RedisModuleKey *idxKey = NULL;
+  FieldSpec **tagFields = getFieldsByType(sctx->spec, FIELD_TAG);
+  if (array_len(tagFields) != 0) {
+    for (int i = 0 ; i < array_len(tagFields) ; ++i) {
+      RedisModuleString *keyName = IndexSpec_GetFormattedKey(sctx->spec, tagFields[i]);
+      TagIndex *tagIdx = TagIndex_Open(sctx->redisCtx, keyName, false, &idxKey);
+      if (!tagIdx) {
+        continue;
+      }
+
+      // tag field name
+      ForkGc_FDWriteBuffer(gc->pipefd[1], tagFields[i]->name, strlen(tagFields[i]->name) + 1);
+      // numeric field unique id
+      ForkGc_FDWriteLongLong(gc->pipefd[1], tagIdx->uniqueId);
+
+      TrieMapIterator *iter = TrieMap_Iterate(tagIdx->values, "", 0);
+      char *ptr;
+      tm_len_t len;
+      InvertedIndex *value;
+      while(TrieMapIterator_Next(iter, &ptr, &len, (void**)&value)){
+        // send inverted index pointer
+        ForkGc_FDWriteLongLong(gc->pipefd[1], (long long)value);
+        // send repaired data
+        ForkGc_InvertedIndexRepair(gc, sctx, value, NULL, NULL);
+      }
+
+      // we are done with the current field
+      ForkGc_FDWriteLongLong(gc->pipefd[1], 0);
+
+      if (idxKey) RedisModule_CloseKey(idxKey);
+    }
+  }
+  // we are done with numeric fields
+  ForkGc_FDWriteBuffer(gc->pipefd[1], "\0", 1);
+
+}
+
 static void ForkGc_CollectGarbage(ForkGCCtx *gc){
   RedisModuleCtx *rctx = RedisModule_GetThreadSafeContext(NULL);
   RedisSearchCtx *sctx = NewSearchCtx(rctx, (RedisModuleString *)gc->keyName);
@@ -237,6 +276,8 @@ static void ForkGc_CollectGarbage(ForkGCCtx *gc){
   ForkGc_CollectGarbageFromInvIdx(gc, sctx);
 
   ForkGc_CollectGarbageFromNumIdx(gc, sctx);
+
+  ForkGc_CollectGarbageFromTagIdx(gc, sctx);
 
   if (sctx) {
     RedisModule_CloseKey(sctx->key);
@@ -371,6 +412,11 @@ cleanup:
   return true;
 }
 
+// performs cleanup and return
+#define RETURN *ret_val = 0; shouldReturn = true; goto loop_cleanup;
+// performs cleanup and continue with the loop
+#define CONTINUE goto loop_cleanup;
+
 bool ForkGc_ReadNumericInvertedIndex(ForkGCCtx *gc, int* ret_val){
   size_t fieldNameLen;
   char* fieldName = ForkGc_FDReadBuffer(gc->pipefd[0], &fieldNameLen);
@@ -387,11 +433,6 @@ bool ForkGc_ReadNumericInvertedIndex(ForkGCCtx *gc, int* ret_val){
   NumericRangeNode *currNode = NULL;
   bool shouldReturn = false;
   while((currNode = (NumericRangeNode *)ForkGc_FDReadLongLong(gc->pipefd[0]))){
-
-// performs cleanup and return
-#define RETURN shouldReturn = true; goto loop_cleanup;
-// performs cleanup and continue with the loop
-#define CONTINUE goto loop_cleanup;
 
     ForkGc_InvertedIndexData idxData = {0};
     if(!ForkGc_ReadInvertedIndexFromFork(gc, &idxData)){
@@ -410,7 +451,6 @@ bool ForkGc_ReadNumericInvertedIndex(ForkGCCtx *gc, int* ret_val){
     RedisModule_ThreadSafeContextLock(rctx);
     RedisSearchCtx *sctx = NewSearchCtx(rctx, (RedisModuleString *)gc->keyName);
     if (!sctx || sctx->spec->unique_id != gc->spec_unique_id) {
-      *ret_val = 0;
       RETURN;
     }
 
@@ -470,6 +510,9 @@ loop_cleanup:
     }
     if(shouldReturn){
       RedisModule_FreeThreadSafeContext(rctx);
+      if(fieldName){
+        rm_free(fieldName);
+      }
       return false;
     }
   }
@@ -483,6 +526,75 @@ loop_cleanup:
 
 }
 
+bool ForkGc_ReadTagIndex(ForkGCCtx *gc, int* ret_val){
+  size_t fieldNameLen;
+  char* fieldName = ForkGc_FDReadBuffer(gc->pipefd[0], &fieldNameLen);
+  if(fieldName == NULL || fieldName[0] == '\0'){
+    if(fieldName){
+      rm_free(fieldName);
+    }
+    return false;
+  }
+
+  uint64_t tagUniqueId = ForkGc_FDReadLongLong(gc->pipefd[0]);
+  bool shouldReturn = false;
+  RedisModuleCtx *rctx = RedisModule_GetThreadSafeContext(NULL);
+  InvertedIndex *value = NULL;
+  while((value = (InvertedIndex*)ForkGc_FDReadLongLong(gc->pipefd[0]))){
+    ForkGc_InvertedIndexData idxData = {0};
+    if(!ForkGc_ReadInvertedIndexFromFork(gc, &idxData)){
+      continue;
+    }
+
+    RedisSearchCtx *sctx = NewSearchCtx(rctx, (RedisModuleString *)gc->keyName);
+    if (!sctx || sctx->spec->unique_id != gc->spec_unique_id) {
+      RETURN;
+    }
+
+    RedisModuleKey *idxKey = NULL;
+    RedisModuleString *keyName = TagIndex_FormatName(sctx, fieldName);
+    TagIndex *tagIdx = TagIndex_Open(sctx->redisCtx, keyName, false, &idxKey);
+
+    if(tagIdx->uniqueId != tagUniqueId){
+      RETURN;
+    }
+
+    ForkGc_FixInvertedIndex(gc, &idxData, value);
+
+    ForkGc_updateStats(sctx, gc, idxData.docsCollected, idxData.bytesCollected);
+
+loop_cleanup:
+    RedisModule_ThreadSafeContextUnlock(rctx);
+    if (sctx) {
+      RedisModule_CloseKey(sctx->key);
+      SearchCtx_Free(sctx);
+    }
+    if(idxData.blocksModified){
+      array_free(idxData.blocksModified);
+    }
+    if(keyName){
+      RedisModule_FreeString(rctx, keyName);
+    }
+    if(idxKey){
+      RedisModule_CloseKey(idxKey);
+    }
+    if(shouldReturn){
+      RedisModule_FreeThreadSafeContext(rctx);
+      if(fieldName){
+        rm_free(fieldName);
+      }
+      return false;
+    }
+  }
+
+  RedisModule_FreeThreadSafeContext(rctx);
+
+  if(fieldName){
+    rm_free(fieldName);
+  }
+  return true;
+}
+
 void ForkGc_ReadGarbageFromFork(ForkGCCtx *gc, int* ret_val){
   while (ForkGc_ReadInvertedIndex(gc, ret_val));
 
@@ -491,6 +603,12 @@ void ForkGc_ReadGarbageFromFork(ForkGCCtx *gc, int* ret_val){
   }
 
   while (ForkGc_ReadNumericInvertedIndex(gc, ret_val));
+
+  if(!(*ret_val)){
+    return;
+  }
+
+  while (ForkGc_ReadTagIndex(gc, ret_val));
 }
 
 static int ForkGc_PeriodicCallback(RedisModuleCtx *ctx, void *privdata) {

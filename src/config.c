@@ -222,6 +222,20 @@ CONFIG_GETTER(getGcScanSize) {
 }
 
 // MIN_PHONETIC_TERM_LEN
+CONFIG_SETTER(setForkGcInterval) {
+  long long val;
+  if (readLongLongLimit(argv, argc, offset, &val, 1, LLONG_MAX) != REDISMODULE_OK) {
+    return REDISMODULE_ERR;
+  }
+  config->forkGcRunIntervalSec = val;
+  return REDISMODULE_OK;
+}
+
+CONFIG_GETTER(getForkGcInterval) {
+  sds ss = sdsempty();
+  return sdscatprintf(ss, "%lu", config->forkGcRunIntervalSec);
+}
+
 CONFIG_SETTER(setMinPhoneticTermLen) {
   long long val;
   if (readLongLongLimit(argv, argc, offset, &val, 1, LLONG_MAX) != REDISMODULE_OK) {
@@ -370,6 +384,11 @@ RSConfigOptions RSGlobalConfigOptions = {
          .helpText = "gc policy to use (DEFAULT/FORK)",
          .setValue = setGcPolicy,
          .getValue = getGcPolicy,
+         .flags = RSCONFIGVAR_F_IMMUTABLE},
+        {.name = "FORK_GC_RUN_INTERVAL",
+         .helpText = "interval in which to run the fork gc (relevant only when fork gc is used)",
+         .setValue = setForkGcInterval,
+         .getValue = getForkGcInterval,
          .flags = RSCONFIGVAR_F_IMMUTABLE},
         {.name = NULL}}};
 
