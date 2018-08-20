@@ -690,14 +690,14 @@ IndexSpec *NewIndexSpec(const char *name, size_t numFields) {
 }
 
 static gc IndexSpec_CreateGarbageCollection(RedisModuleString *keyName, float initialHZ, uint64_t unique_id){
-  switch(RSGlobalConfig.gcPolicy){
-  case GCPolicy_Fork:
-    return NewForkGarbageCollector(keyName, unique_id);
-    break;
-  case GCPolicy_Default:
-  default:
-    return NewGarbageCollector(keyName, initialHZ, unique_id);
-    break;
+  switch (RSGlobalConfig.gcPolicy) {
+    case GCPolicy_Fork:
+      return NewForkGarbageCollector(keyName, unique_id);
+      break;
+    case GCPolicy_Default:
+    default:
+      return NewGarbageCollector(keyName, initialHZ, unique_id);
+      break;
   }
 }
 
