@@ -1289,7 +1289,7 @@ class SearchTestCase(BaseSearchTestCase):
             return d
 
         stats = get_stats(r)
-        if('current_hz' in stats['gc_stats']):
+        if 'current_hz' in stats['gc_stats']:
             self.assertGreater(stats['gc_stats']['current_hz'], 8)
         self.assertEqual(0, stats['gc_stats']['bytes_collected'])
         self.assertGreater(int(stats['num_records']), 0)

@@ -49,7 +49,7 @@ typedef struct ForkGCCtx {
 
 typedef struct gc gc;
 
-gc NewForkGarbageCollector(const RedisModuleString *k, uint64_t spec_unique_id);
+gc NewForkGC(const RedisModuleString *k, uint64_t spec_unique_id);
 int ForkGc_StartForkGC(void *ctx);
 int ForkGc_StopForkGC(void *ctx);
 void ForkGc_RenderStats(RedisModuleCtx *ctx, void *gcCtx);

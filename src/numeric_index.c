@@ -70,7 +70,7 @@ int NumericRange_Add(NumericRange *n, t_docId docId, double value, int checkCard
   if (checkCard) {
     add = 1;
     size_t card = n->card;
-    for (int i = 0; i < array_len(n->values) ; i++) {
+    for (int i = 0; i < array_len(n->values); i++) {
 
       if (n->values[i].value == value) {
         add = 0;
@@ -83,7 +83,7 @@ int NumericRange_Add(NumericRange *n, t_docId docId, double value, int checkCard
   if (n->maxVal == NF_INFINITY || value > n->maxVal) n->maxVal = value;
   if (add) {
     if (n->card < n->splitCard) {
-      CardinalityValue val ={.value = value, .appearances = 1};
+      CardinalityValue val = {.value = value, .appearances = 1};
       n->values = array_append(n->values, val);
       n->unique_sum += value;
     }

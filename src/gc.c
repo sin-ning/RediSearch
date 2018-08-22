@@ -17,8 +17,6 @@
 #include <sys/wait.h>
 #include <stdbool.h>
 
-uint32_t gcRevisionId = 0;
-
 // convert a frequency to timespec
 struct timespec hzToTimeSpec(float hz) {
   struct timespec ret;

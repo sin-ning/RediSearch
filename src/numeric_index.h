@@ -17,7 +17,7 @@
 typedef struct {
   double value;
   int appearances;
-}CardinalityValue;
+} CardinalityValue;
 
 /* A numeric range is a node in a numeric range tree, representing a range of values bunched
  * toghether.
@@ -48,9 +48,7 @@ typedef struct rtNode {
   NumericRange *range;
 } NumericRangeNode;
 
-typedef struct {
-  NumericRangeNode **nodesStack;
-} NumericRangeTreeIterator;
+typedef struct { NumericRangeNode **nodesStack; } NumericRangeTreeIterator;
 
 /* The root tree and its metadata */
 typedef struct {
