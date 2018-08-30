@@ -8,7 +8,7 @@
 #include "util/arr.h"
 #include <assert.h>
 
-uint32_t tagUniqueId = 0;
+static uint32_t tagUniqueId = 0;
 
 // Tags are limited to 4096 each
 #define MAX_TAG_LEN 0x1000

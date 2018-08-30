@@ -30,7 +30,7 @@ typedef struct ForkGCCtx {
   // inverted index key name for reopening the index
   const RedisModuleString *keyName;
 
-  uint64_t spec_unique_id;
+  uint64_t specUniqueId;
 
   // periodic timer
   struct RMUtilTimer *timer;
@@ -47,9 +47,9 @@ typedef struct ForkGCCtx {
 
 } ForkGCCtx;
 
-typedef struct gc gc;
+typedef struct GCContext GCContext;
 
-gc NewForkGC(const RedisModuleString *k, uint64_t spec_unique_id);
+GCContext NewForkGC(const RedisModuleString *k, uint64_t specUniqueId);
 int ForkGc_StartForkGC(void *ctx);
 int ForkGc_StopForkGC(void *ctx);
 void ForkGc_RenderStats(RedisModuleCtx *ctx, void *gcCtx);

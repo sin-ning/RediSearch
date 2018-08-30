@@ -56,14 +56,14 @@ typedef struct GarbageCollectorCtx {
 
   NumericFieldGCCtx **numericGCCtx;
 
-  uint64_t spec_unique_id;
+  uint64_t specUniqueId;
 
   bool noLockMode;
 
 } GarbageCollectorCtx;
 
 /* Create a new garbage collector, with a string for the index name, and initial frequency */
-gc NewGarbageCollector(const RedisModuleString *k, float initialHZ, uint64_t spec_unique_id) {
+GCContext NewGarbageCollector(const RedisModuleString *k, float initialHZ, uint64_t specUniqueId) {
   GarbageCollectorCtx *gcCtx = malloc(sizeof(*gcCtx));
 
   *gcCtx = (GarbageCollectorCtx){
@@ -76,9 +76,9 @@ gc NewGarbageCollector(const RedisModuleString *k, float initialHZ, uint64_t spe
   };
 
   gcCtx->numericGCCtx = array_new(NumericFieldGCCtx *, NUMERIC_GC_INITIAL_SIZE);
-  gcCtx->spec_unique_id = spec_unique_id;
+  gcCtx->specUniqueId = specUniqueId;
 
-  return (gc){
+  return (GCContext){
     .gcCtx = gcCtx,
     .start = GC_Start,
     .stop = GC_Stop,
@@ -100,7 +100,7 @@ size_t gc_RandomTerm(RedisModuleCtx *ctx, GarbageCollectorCtx *gc, int *status) 
   RedisSearchCtx *sctx = NewSearchCtx(ctx, (RedisModuleString *)gc->keyName);
   size_t totalRemoved = 0;
   size_t totalCollected = 0;
-  if (!sctx || sctx->spec->unique_id != gc->spec_unique_id) {
+  if (!sctx || sctx->spec->uniqueId != gc->specUniqueId) {
     RedisModule_Log(ctx, "warning", "No index spec for GC %s",
                     RedisModule_StringPtrLen(gc->keyName, NULL));
     *status = SPEC_STATUS_INVALID;
@@ -137,7 +137,7 @@ size_t gc_RandomTerm(RedisModuleCtx *ctx, GarbageCollectorCtx *gc, int *status) 
       RedisModule_CloseKey(idxKey);
       sctx = SearchCtx_Refresh(sctx, (RedisModuleString *)gc->keyName);
       // sctx null --> means it was deleted and we need to stop right now
-      if (!sctx || sctx->spec->unique_id != gc->spec_unique_id) {
+      if (!sctx || sctx->spec->uniqueId != gc->specUniqueId) {
         *status = SPEC_STATUS_INVALID;
         break;
       }
@@ -222,7 +222,7 @@ size_t gc_TagIndex(RedisModuleCtx *ctx, GarbageCollectorCtx *gc, int *status) {
   char *randomKey = NULL;
   RedisModuleKey *idxKey = NULL;
   RedisSearchCtx *sctx = NewSearchCtx(ctx, (RedisModuleString *)gc->keyName);
-  if (!sctx || sctx->spec->unique_id != gc->spec_unique_id) {
+  if (!sctx || sctx->spec->uniqueId != gc->specUniqueId) {
     RedisModule_Log(ctx, "warning", "No index spec for GC %s",
                     RedisModule_StringPtrLen(gc->keyName, NULL));
     *status = SPEC_STATUS_INVALID;
@@ -265,7 +265,7 @@ size_t gc_TagIndex(RedisModuleCtx *ctx, GarbageCollectorCtx *gc, int *status) {
     RedisModule_CloseKey(idxKey);
     sctx = SearchCtx_Refresh(sctx, (RedisModuleString *)gc->keyName);
     // sctx null --> means it was deleted and we need to stop right now
-    if (!sctx || sctx->spec->unique_id != gc->spec_unique_id) {
+    if (!sctx || sctx->spec->uniqueId != gc->specUniqueId) {
       *status = SPEC_STATUS_INVALID;
       break;
     }
@@ -301,7 +301,7 @@ size_t gc_NumericIndex(RedisModuleCtx *ctx, GarbageCollectorCtx *gc, int *status
   RedisModuleKey *idxKey = NULL;
   FieldSpec **numericFields = NULL;
   RedisSearchCtx *sctx = NewSearchCtx(ctx, (RedisModuleString *)gc->keyName);
-  if (!sctx || sctx->spec->unique_id != gc->spec_unique_id) {
+  if (!sctx || sctx->spec->uniqueId != gc->specUniqueId) {
     RedisModule_Log(ctx, "warning", "No index spec for GC %s",
                     RedisModule_StringPtrLen(gc->keyName, NULL));
     *status = SPEC_STATUS_INVALID;
@@ -364,7 +364,7 @@ size_t gc_NumericIndex(RedisModuleCtx *ctx, GarbageCollectorCtx *gc, int *status
 
     sctx = SearchCtx_Refresh(sctx, (RedisModuleString *)gc->keyName);
     // sctx null --> means it was deleted and we need to stop right now
-    if (!sctx || sctx->spec->unique_id != gc->spec_unique_id) {
+    if (!sctx || sctx->spec->uniqueId != gc->specUniqueId) {
       *status = SPEC_STATUS_INVALID;
       break;
     }

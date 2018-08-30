@@ -169,14 +169,14 @@ typedef uint16_t FieldSpecDedupeArray[SPEC_MAX_FIELDS];
 
 #define FIELD_BIT(fs) (((t_fieldMask)1) << (fs)->textOpts.id)
 
-typedef struct gc{
+typedef struct GCContext{
   void* gcCtx;
   int (*start)(void* ctx);
   int (*stop)(void* ctx);
   void (*renderStats)(RedisModuleCtx *ctx, void *gc);
   void (*onDelete)(void *ctx);
   void (*forceInvoke)(void *ctx, RedisModuleBlockedClient *rctx);
-}gc;
+}GCContext;
 
 typedef struct {
   char *name;
@@ -194,11 +194,11 @@ typedef struct {
 
   StopWordList *stopwords;
 
-  gc gc;
+  GCContext gc;
 
   SynonymMap *smap;
 
-  uint64_t unique_id;
+  uint64_t uniqueId;
 
   RedisModuleCtx *strCtx;
   RedisModuleString **indexStrs;

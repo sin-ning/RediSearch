@@ -283,7 +283,7 @@ static void ForkGc_CollectGarbage(ForkGCCtx *gc) {
   RedisSearchCtx *sctx = NewSearchCtx(rctx, (RedisModuleString *)gc->keyName);
   size_t totalRemoved = 0;
   size_t totalCollected = 0;
-  if (!sctx || sctx->spec->unique_id != gc->spec_unique_id) {
+  if (!sctx || sctx->spec->uniqueId != gc->specUniqueId) {
     // write log here
     RedisModule_FreeThreadSafeContext(rctx);
     return;
@@ -391,7 +391,7 @@ bool ForkGc_ReadInvertedIndex(ForkGCCtx *gc, int *ret_val) {
   RedisModuleKey *idxKey = NULL;
   RedisSearchCtx *sctx = NULL;
   sctx = NewSearchCtx(rctx, (RedisModuleString *)gc->keyName);
-  if (!sctx || sctx->spec->unique_id != gc->spec_unique_id) {
+  if (!sctx || sctx->spec->uniqueId != gc->specUniqueId) {
     *ret_val = 0;
     goto cleanup;
   }
@@ -473,7 +473,7 @@ bool ForkGc_ReadNumericInvertedIndex(ForkGCCtx *gc, int *ret_val) {
 
     RedisModule_ThreadSafeContextLock(rctx);
     RedisSearchCtx *sctx = NewSearchCtx(rctx, (RedisModuleString *)gc->keyName);
-    if (!sctx || sctx->spec->unique_id != gc->spec_unique_id) {
+    if (!sctx || sctx->spec->uniqueId != gc->specUniqueId) {
       RETURN;
     }
 
@@ -568,7 +568,7 @@ bool ForkGc_ReadTagIndex(ForkGCCtx *gc, int *ret_val) {
     }
 
     RedisSearchCtx *sctx = NewSearchCtx(rctx, (RedisModuleString *)gc->keyName);
-    if (!sctx || sctx->spec->unique_id != gc->spec_unique_id) {
+    if (!sctx || sctx->spec->uniqueId != gc->specUniqueId) {
       RETURN;
     }
 
@@ -748,7 +748,7 @@ void ForkGc_ForceInvoke(void *ctx, RedisModuleBlockedClient *bc) {
   RMUtilTimer_ForceInvoke(gc->timer, bc);
 }
 
-gc NewForkGC(const RedisModuleString *k, uint64_t spec_unique_id) {
+GCContext NewForkGC(const RedisModuleString *k, uint64_t specUniqueId) {
   ForkGCCtx *forkGc = malloc(sizeof(*forkGc));
 
   *forkGc = (ForkGCCtx){
@@ -756,11 +756,11 @@ gc NewForkGC(const RedisModuleString *k, uint64_t spec_unique_id) {
       .keyName = k,
       .stats = {},
       .rdbPossiblyLoading = 1,
-      .spec_unique_id = spec_unique_id,
+      .specUniqueId = specUniqueId,
       .noLockMode = false,
   };
 
-  return (gc){
+  return (GCContext){
       .gcCtx = forkGc,
       .start = ForkGc_StartForkGC,
       .stop = ForkGc_StopForkGC,

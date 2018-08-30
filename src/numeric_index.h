@@ -16,7 +16,7 @@
 
 typedef struct {
   double value;
-  int appearances;
+  size_t appearances;
 } CardinalityValue;
 
 /* A numeric range is a node in a numeric range tree, representing a range of values bunched
