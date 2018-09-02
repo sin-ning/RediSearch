@@ -78,7 +78,7 @@ typedef struct {
   size_t minPhoneticTermLen;
 
   GCPolicy gcPolicy;
-  GCPolicy forkGcRunIntervalSec;
+  size_t forkGcRunIntervalSec;
 } RSConfig;
 
 typedef enum {

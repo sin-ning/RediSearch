@@ -5,6 +5,7 @@
 #include "tag_index.h"
 #include "numeric_index.h"
 #include "phonetic_manager.h"
+#include "gc.h"
 
 static void ReplyReaderResults(IndexReader *reader, RedisModuleCtx *ctx) {
   IndexIterator *iter = NewReadIterator(reader);
@@ -169,7 +170,7 @@ static void GCForceInvoke(RedisModuleCtx *ctx, RedisModuleString *idx){
     RedisModule_ReplyWithError(ctx, "Unknown index name");
   }
   RedisModuleBlockedClient *bc = RedisModule_BlockClient(ctx, GCForceInvokeReply, GCForceInvokeReplyTimeout, NULL, INVOKATION_TIMEOUT);
-  sp->gc.forceInvoke(sp->gc.gcCtx, bc);
+  GCContext_ForceInvoke(sp->gc, bc);
 }
 
 int DebugCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {

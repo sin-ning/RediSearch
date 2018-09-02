@@ -1305,7 +1305,7 @@ class SearchTestCase(BaseSearchTestCase):
             if stats['num_records'] == '0':
                 break
 
-        for i in range(100):
+        for _ in range(100):
             # gc is random so we need to do it long enough times for it to work
             self.cmd('ft.debug', 'GC_FORCEINVOKE', 'idx')
 

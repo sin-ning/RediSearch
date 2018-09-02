@@ -28,7 +28,6 @@
 #include "ext/default.h"
 #include "search_request.h"
 #include "config.h"
-#include "gc.h"
 #include "aggregate/aggregate.h"
 #include "rmalloc.h"
 #include "cursor.h"
@@ -388,9 +387,9 @@ int IndexInfoCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
   REPLY_KVNUM(n, "offset_bits_per_record_avg",
               8.0F * (float)sp->stats.offsetVecsSize / (float)sp->stats.offsetVecRecords);
 
-  if (sp->gc.gcCtx) {
+  if (sp->gc) {
     RedisModule_ReplyWithSimpleString(ctx, "gc_stats");
-    sp->gc.renderStats(ctx, sp->gc.gcCtx);
+    GCContext_RenderStats(sp->gc, ctx);
     n += 2;
   }
 
@@ -720,8 +719,8 @@ int DeleteCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     }
 
     // Increment the index's garbage collector's scanning frequency after document deletions
-    if (sp->gc.gcCtx) {
-      sp->gc.onDelete(sp->gc.gcCtx);
+    if (sp->gc) {
+      GCContext_OnDelete(sp->gc);
     }
   }
 
